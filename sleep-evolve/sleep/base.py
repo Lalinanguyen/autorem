@@ -28,11 +28,11 @@ class SleepPolicy(Protocol):
 
 
 def step_events(history: list[dict]) -> list[dict]:
-    return [h for h in history if h["event"] == "step"]
+    return [h for h in history if h.get("event", "step") == "step"]
 
 
 def steps_since_last_sleep(history: list[dict]) -> list[dict]:
-    last = max((i for i, h in enumerate(history) if h["event"] == "sleep"), default=-1)
+    last = max((i for i, h in enumerate(history) if h.get("event") == "sleep"), default=-1)
     return step_events(history[last + 1 :])
 
 

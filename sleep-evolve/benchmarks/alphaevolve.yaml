@@ -1,0 +1,578 @@
+# AlphaEvolve benchmark registry: what every run is scored against.
+#
+# Every number cites its source. Values were extracted as DATA from the sources below (problem
+# pages parsed from their embedded JS `problemData`, notebooks read as JSON with ast.literal_eval;
+# no notebook code was executed). "computed" values were obtained by applying a rewritten port of
+# the notebook's own scoring formula to the published construction; the notebook's printed/stated
+# rounded value is cited next to it.
+#
+# Conventions
+#   direction        maximize | minimize the published quantity (`value`)
+#   score_transform  how our evaluators turn `value` into a higher-is-better score:
+#                    identity (score = value) | negate (score = -value; DEVIN_TASKS ground rules)
+#   instances        every instance AlphaEvolve reported. A run is scored against the instance whose
+#                    `params` equal the params its evaluator declares (benchmarks/evaluator_instances.py);
+#                    anything else is refused as an instance mismatch.
+#   evaluator        "module:Class" once an evaluator exists and its construction is verified,
+#                    otherwise "pending" (verification skipped, scoring refused).
+#   value records    {value, source, note?, missing_note?}; value: null requires missing_note.
+#   match_tolerance  absolute tolerance in score units for matched_ae / beat_ae.
+#   verification_tolerance  absolute tolerance for reproducing alphaevolve_value from the construction.
+
+schema_version: 1
+retrieved: "2026-11-14"
+sources:
+  repo: "https://github.com/google-deepmind/alphaevolve_repository_of_problems (branch main, fetched 2026-11-14)"
+  status_json: "alphaevolve_repository_of_problems/status.json"
+  paper: "arXiv:2511.02864v3 (HTML). Paper problem labels 'Problem 6.N' equal repo problem numbers N; problem pages cite subsection numbers ('Section 6.19' = Section 6, subsection 19)."
+  results_colab: "https://github.com/google-deepmind/alphaevolve_results/blob/master/mathematical_results.ipynb (May 2025 results colab)"
+status_labels:   # status.json key -> registry status (identity today; problems absent from status.json are `unlisted`)
+  world_record: world_record
+  former_record: former_record
+  worse_than_record: worse_than_record
+  matched_optimal: matched_optimal
+
+problems:
+
+  - problem_id: 2
+    name: "An autocorrelation problem related to Sidon sets"
+    tier: 1
+    page: "problems/2.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.2 (page: 'Section 6.2')"
+    status: world_record
+    status_raw: world_record
+    evaluator: pending
+    instances:
+      - id: step_c1_upper
+        params: {function: nonnegative_step, support: "[-1/4,1/4]", steps: equal_width, n_steps: free}
+        quantity: "upper bound on C = 2n*max(f*f)/(sum f)^2 (notebook evaluate_sequence)"
+        direction: minimize
+        score_transform: negate
+        alphaevolve_value:
+          value: 1.5031635546815607
+          source: "experiments/autocorrelation_problems/autocorrelation_problems.ipynb cell 60 ('Data and verification (score = 1.5032)', n=1319 steps), computed with a port of evaluate_sequence (cell 21); paper Problem 6.2: C <= 1.5032"
+        prior_best_value:
+          value: 1.50992
+          source: "paper Problem 6.2 (prior bound 1.50992, Matolcsi-Vinuesa [210]); problems/2.html comments table"
+        current_best_value:
+          value: 1.5029
+          holder: "Yuksekgonul et al. (Jan 2026)"
+          source: "problems/2.html comments table (upper bounds)"
+        match_tolerance: 1.0e-6
+        verification_tolerance: 1.0e-9
+        other_reported:
+          - {value: 1.5052939684401607, source: "autocorrelation_problems.ipynb cell 46 ('score = 1.5053'), computed"}
+          - {value: 1.503952812118346, source: "autocorrelation_problems.ipynb cell 49 ('score = 1.5040'), computed"}
+        third_party: []
+
+  - problem_id: 3
+    name: "How much can an autocorrelation of a non-negative function resemble an indicator function?"
+    tier: 1
+    page: "problems/3.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.3 (page: 'Section 6.2')"
+    status: former_record
+    status_raw: former_record
+    evaluator: pending
+    instances:
+      - id: step_c2_lower_50000
+        params: {function: nonnegative_step, support: "[-1/4,1/4]", steps: equal_width, n_steps: 50000}
+        quantity: "lower bound on C = ||f*f||_2^2 / (||f*f||_1 ||f*f||_inf) (notebook cell 92, piecewise-linear f*f)"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: 0.9610210777840238
+          source: "autocorrelation_problems.ipynb cell 91 (heights_sequence_2, 50,000 steps), computed with a port of the verification in cell 92; paper Problem 6.3: C >= 0.961"
+        prior_best_value:
+          value: 0.88922
+          source: "paper Problem 6.3 (0.88922 <= C, Matolcsi-Vinuesa); problems/3.html comments table"
+          note: "Boyer-Li independently reached 0.901564 (paper Problem 6.3 [42]); AlphaEvolve's own quick experiment first gave 0.8962."
+        current_best_value:
+          value: null
+          source: "status.json (former_record); problems/3.html; paper Problem 6.3"
+          missing_note: "status.json labels problem 3 former_record, implying something later beat AlphaEvolve's 0.961, but neither the problem page (lists lower bounds up to 0.901564) nor the paper names it. Not found."
+        match_tolerance: 1.0e-6
+        verification_tolerance: 1.0e-9
+        other_reported:
+          - {value: 0.8962, source: "paper Problem 6.3 (AlphaEvolve quick experiment)"}
+        third_party: []
+
+  - problem_id: 5
+    name: "Erdős minimum overlap problem"
+    tier: 1
+    page: "problems/5.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.5 (page: 'Section 6.2')"
+    status: world_record
+    status_raw: world_record
+    evaluator: pending
+    instances:
+      - id: step_h_upper
+        params: {function: step, values_in: "[0,1]", sum_constraint: "sum = n/2 (exact)", n_steps: free}
+        quantity: "upper bound on C = max(correlate(h, 1-h)) * 2/n (colab compute_upper_bound)"
+        direction: minimize
+        score_transform: negate
+        alphaevolve_value:
+          value: 0.38092303510845016
+          source: "google-deepmind/alphaevolve_results mathematical_results.ipynb cell 78 (B.5 data, symmetric sequence, n=95), computed with a port of compute_upper_bound (cell 77); colab text and paper Problem 6.5: C <= 0.380924"
+          note: "No notebook in the problems repo; problems/5.html links the alphaevolve_results colab."
+        prior_best_value:
+          value: 0.380926853433087
+          source: "paper Problem 6.5 (Haugland 2016 [164]: 0.3809268534330870)"
+        current_best_value:
+          value: 0.380876
+          holder: "Yuksekgonul et al. (Jan 2026)"
+          source: "problems/5.html comments table (upper bounds)"
+        match_tolerance: 1.0e-7
+        verification_tolerance: 1.0e-12
+        third_party: []
+
+  - problem_id: 7
+    name: "Difference Bases"
+    tier: 1
+    page: "problems/7.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.7 (page: 'Section 6.3')"
+    status: world_record
+    status_raw: world_record
+    evaluator: pending
+    instances:
+      - id: difference_basis_upper
+        params: {set: nonnegative_integers, n: free, max_set_size: 2000}
+        quantity: "upper bound on C = |B|^2 / n, n = largest integer with 1..n all differences of B (notebook get_score)"
+        direction: minimize
+        score_transform: negate
+        alphaevolve_value:
+          value: 2.639027469506608
+          source: "experiments/difference_bases/difference_bases.ipynb cell 1 (A=[0,1,4,6], Singer set B, m=89^2+89+1 -> |B|=360 covering 1..49109), computed with a port of get_score; paper Problem 6.7: 2.6571 -> 2.6390"
+        prior_best_value:
+          value: 2.6571
+          source: "paper Problem 6.7 (Delta(6166) <= 128)"
+        current_best_value:
+          value: 2.639027469506608
+          holder: "AlphaEvolve"
+          source: "status.json world_record; problems/7.html lists no later improvement"
+        match_tolerance: 1.0e-9
+        verification_tolerance: 1.0e-12
+        third_party: []
+
+  - problem_id: 29
+    name: "Block Stacking Problem"
+    tier: 2
+    page: "problems/29.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.29 (page: 'Section 6.14')"
+    status: matched_optimal
+    status_raw: matched_optimal
+    evaluator: pending
+    instances:
+      - id: overhang_n2_49
+        params: {program: "get_positions(n)", n_range: [2, 49], aggregate: "sum of valid overhangs"}
+        quantity: "overhang positions[-1] per n under the notebook's get_positions_score constraints (FLOAT_TOLERANCE = 100*eps)"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: null
+          source: "experiments/block_stacking_problem/block_stacking_problem.ipynb cells 1, 2, 5; paper Problem 6.29"
+          missing_note: "AlphaEvolve rediscovered the closed form C(n) = H_n/2 (generalizer mode). No numeric aggregate score over n=2..49 is reported; one could be derived from the formula but is not stated in any source."
+        prior_best_value:
+          value: null
+          source: "paper Problem 6.29 ('It is well known that C(n) = H_n/2')"
+          missing_note: "closed form C(n) = H_n/2, not a single number"
+        current_best_value:
+          value: null
+          source: "paper Problem 6.29"
+          missing_note: "optimal closed form C(n) = H_n/2"
+        match_tolerance: 1.0e-9
+        verification_tolerance: 1.0e-12
+        third_party: []
+
+  - problem_id: 34
+    name: "Tammes problem"
+    tier: 1
+    page: "problems/34.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.34 (page: 'Section 6.18'), Table 5"
+    status: unlisted
+    status_raw: null
+    status_note: "problem 34 does not appear in status.json"
+    evaluator: pending
+    instance_note: "AlphaEvolve reports 8 values of N. Table 5 values differ from the notebook constructions for N=50, 100, 200 (computed min distances 0.5134718904391984, 0.3650021766366538, 0.2581568433050681): pick N for the evaluator where the notebook construction reproduces Table 5 (N in {3,7,12,25,32})."
+    instances:
+      - {id: N3, params: {N: 3, sphere: S2}, quantity: "min pairwise Euclidean distance after normalizing to the unit sphere", direction: maximize, score_transform: identity,
+         alphaevolve_value: {value: 1.73205081, source: "paper Table 5", note: "notebook tammes_problem.ipynb cell 4 construction computes 1.7320508075688776"},
+         prior_best_value: {value: 1.73205081, source: "paper Table 5 'Best bound' column (Sloane [263]); proven optimal for N=3 (Fejes Toth)"},
+         current_best_value: {value: 1.73205081, source: "paper Table 5"},
+         match_tolerance: 1.0e-8, verification_tolerance: 1.0e-8, third_party: []}
+      - {id: N7, params: {N: 7, sphere: S2}, quantity: "min pairwise distance", direction: maximize, score_transform: identity,
+         alphaevolve_value: {value: 1.25687047, source: "paper Table 5", note: "notebook construction computes 1.25687046785099"},
+         prior_best_value: {value: 1.25687047, source: "paper Table 5 'Best bound'"},
+         current_best_value: {value: 1.25687047, source: "paper Table 5"},
+         match_tolerance: 1.0e-8, verification_tolerance: 1.0e-8, third_party: []}
+      - {id: N12, params: {N: 12, sphere: S2}, quantity: "min pairwise distance", direction: maximize, score_transform: identity,
+         alphaevolve_value: {value: 1.05146222, source: "paper Table 5", note: "notebook construction computes 1.0514622242382672"},
+         prior_best_value: {value: 1.05146222, source: "paper Table 5 'Best bound'"},
+         current_best_value: {value: 1.05146222, source: "paper Table 5"},
+         match_tolerance: 1.0e-8, verification_tolerance: 1.0e-8, third_party: []}
+      - {id: N25, params: {N: 25, sphere: S2}, quantity: "min pairwise distance", direction: maximize, score_transform: identity,
+         alphaevolve_value: {value: 0.71077615, source: "paper Table 5", note: "notebook construction computes 0.7107761520889986"},
+         prior_best_value: {value: 0.71077616, source: "paper Table 5 'Best bound'"},
+         current_best_value: {value: 0.71077616, source: "paper Table 5 'Best bound'"},
+         match_tolerance: 1.0e-8, verification_tolerance: 1.0e-8, third_party: []}
+      - {id: N32, params: {N: 32, sphere: S2}, quantity: "min pairwise distance", direction: maximize, score_transform: identity,
+         alphaevolve_value: {value: 0.642469271, source: "paper Table 5", note: "notebook construction computes 0.6424692714440441"},
+         prior_best_value: {value: 0.642469276, source: "paper Table 5 'Best bound'"},
+         current_best_value: {value: 0.642469276, source: "paper Table 5 'Best bound'"},
+         match_tolerance: 1.0e-9, verification_tolerance: 1.0e-9, third_party: []}
+      - {id: N50, params: {N: 50, sphere: S2}, quantity: "min pairwise distance", direction: maximize, score_transform: identity,
+         alphaevolve_value: {value: 0.513472033, source: "paper Table 5", note: "MISMATCH: notebook construction computes 0.5134718904391984"},
+         prior_best_value: {value: 0.513472085, source: "paper Table 5 'Best bound'"},
+         current_best_value: {value: 0.513472085, source: "paper Table 5 'Best bound'"},
+         match_tolerance: 1.0e-9, verification_tolerance: 1.0e-9, third_party: []}
+      - {id: N100, params: {N: 100, sphere: S2}, quantity: "min pairwise distance", direction: maximize, score_transform: identity,
+         alphaevolve_value: {value: 0.3650062845, source: "paper Table 5", note: "MISMATCH: notebook construction computes 0.3650021766366538"},
+         prior_best_value: {value: 0.3650064961, source: "paper Table 5 'Best bound'"},
+         current_best_value: {value: 0.3650064961, source: "paper Table 5 'Best bound'"},
+         match_tolerance: 1.0e-10, verification_tolerance: 1.0e-10, third_party: []}
+      - {id: N200, params: {N: 200, sphere: S2}, quantity: "min pairwise distance", direction: maximize, score_transform: identity,
+         alphaevolve_value: {value: 0.26081521504, source: "paper Table 5", note: "MISMATCH: notebook construction computes 0.2581568433050681"},
+         prior_best_value: {value: 0.260990251, source: "paper Table 5 'Best bound'"},
+         current_best_value: {value: 0.260990251, source: "paper Table 5 'Best bound'"},
+         match_tolerance: 1.0e-10, verification_tolerance: 1.0e-10, third_party: []}
+
+  - problem_id: 36
+    name: "Circle packing in a square / rectangle"
+    tier: 1
+    page: "problems/36.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.36 (page: 'Section 6.19')"
+    status: former_record
+    status_raw: former_record
+    evaluator: "evaluators.p36_circle_packing:CirclePacking26"
+    instances:
+      - id: n26_unit_square
+        params: {n: 26, container: unit_square}
+        quantity: "sum of radii of n disjoint circles inside [0,1]^2"
+        direction: maximize
+        score_transform: identity
+        construction: "tests/data/p36_alphaevolve_n26.json"
+        published_scorer: p36_check_construction
+        alphaevolve_value:
+          value: 2.6359830849176067
+          source: "experiments/packing_circles_max_sum_of_radii/packing_circles_max_sum_of_radii.ipynb cell 3 (radii_26), math.fsum of the radii; passes the notebook's exact check_construction (cell 2)"
+          note: "np.sum gives 2.6359830849176076 (pairwise summation). This is the full-precision construction from AlphaEvolve's 'brief subsequent experiment' (paper Problem 6.36). The May 2025 results colab (cell 118) has the truncated construction summing to 2.6358627564136983, published as 2.635."
+        prior_best_value:
+          value: 2.634
+          source: "packing_circles_max_sum_of_radii.ipynb cell 1 ('For n=26, the SOTA was 2.634')"
+        current_best_value:
+          value: 2.6359830849176067
+          holder: "AlphaEvolve (subsequent experiment)"
+          source: "paper Problem 6.36: the new construction 'surpasses these recent bounds' (Berthold [25], Deza [94])"
+          note: "status.json still says former_record (AlphaEvolve's originally published 2.635 was beaten by Berthold and Deza). ShinkaEvolve's 1e-6-slack value 2.635983099011548 is higher but not exactly valid."
+        match_tolerance: 1.0e-6
+        verification_tolerance: 1.0e-12
+        third_party:
+          - system: OpenEvolve
+            value: 2.635977394746595
+            comparable: true
+            evaluations_or_cost: "450 iterations (100 phase_1 + 100 phase_2 + 250 phase_2), best found at iteration 206"
+            verification: "OpenEvolve examples/circle_packing evaluator"
+            source: "https://github.com/algorithmicsuperintelligence/openevolve/issues/156 ; examples/circle_packing/README.md 'Results'"
+          - system: OpenEvolve (community run, A. Deza)
+            value: 2.635983
+            comparable: true
+            evaluations_or_cost: "100 phase_1 + 100 phase_2 iterations (Gemini models)"
+            verification: "OpenEvolve evaluator; value reported to 6 decimals only"
+            source: "https://github.com/algorithmicsuperintelligence/openevolve/issues/156 (comment by ArnaudDeza, 2025-08-05); paper reference [94]"
+          - system: ShinkaEvolve
+            value: 2.6359828390115476
+            comparable: true
+            evaluations_or_cost: "fewer than 150 program evaluations (paper Fig. 5)"
+            verification: "made exact by shrinking each radius by 1e-8 (from 2.635983099011548 under OpenEvolve's 1e-6 slack); a separate run with AlphaEvolve's exact checker reached 2.63597770931127"
+            source: "https://arxiv.org/abs/2509.19349 (v1) Section 4.1 and Appendix B.1"
+          - system: GEPA optimize_anything
+            value: 2.63598
+            comparable: true
+            evaluations_or_cost: "max_metric_calls=150, reflection_lm openai/gpt-5 (appendix B config)"
+            verification: "own evaluator (no-overlap, inside unit square); score reported only as '2.63598+'"
+            source: "https://github.com/gepa-ai/gepa/blob/main/docs/docs/blog/posts/2026-02-18-introducing-optimize-anything/index.md (section 6) and appendix/appendix-b-circle-packing.snippet"
+            note: "value is a lower bound given to 5 decimals"
+          - system: FICO Xpress (T. Berthold)
+            value: null
+            comparable: true
+            source: "https://www.fico.com/blogs/best-global-optimization-solver (cited by problems/36.html and paper [25])"
+            missing_note: "blog page could not be retrieved (bot-blocked); value not recorded"
+      - id: n32_unit_square
+        params: {n: 32, container: unit_square}
+        quantity: "sum of radii"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: 2.939572771206323
+          source: "packing_circles_max_sum_of_radii.ipynb cell 6 (radii_32), math.fsum"
+          note: "validity not checked here (no n=32 evaluator); May 2025 colab construction_2 sums to 2.937944526205518"
+        prior_best_value: {value: 2.936, source: "packing_circles_max_sum_of_radii.ipynb cell 1"}
+        current_best_value: {value: 2.939572771206323, holder: "AlphaEvolve", source: "packing_circles_max_sum_of_radii.ipynb cell 6"}
+        match_tolerance: 1.0e-6
+        verification_tolerance: 1.0e-12
+        third_party: []
+      - id: n21_rect_perimeter4
+        params: {n: 21, container: rectangle_perimeter_4}
+        quantity: "sum of radii (rectangle of perimeter 4, width chosen by the solver)"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: 2.365
+          source: "packing_circles_max_sum_of_radii.ipynb cell 12 ('AlphaEvolve improved it to 2.365')"
+          note: "rounded; construction (cell 13) not re-scored here"
+        prior_best_value: {value: 2.364, source: "packing_circles_max_sum_of_radii.ipynb cell 12"}
+        current_best_value: {value: 2.365, holder: "AlphaEvolve", source: "packing_circles_max_sum_of_radii.ipynb cell 12", note: "rounded"}
+        match_tolerance: 1.0e-3
+        verification_tolerance: 1.0e-3
+        third_party: []
+
+  - problem_id: 44
+    name: "Sum-difference problem III"
+    tier: 1
+    page: "problems/44.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.44 (page: 'Section 6.25')"
+    status: former_record
+    status_raw: former_record
+    evaluator: pending
+    instances:
+      - id: ruzsa_U_lower
+        params: {set: "U subset of nonnegative integers, 0 in U, |U-U| <= 2 max U + 1", size: free}
+        quantity: "lower bound 1 + log(|U-U|/|U+U|) / log(2 max U + 1) (paper eq. 6.15; notebook cell 10 compute_lower_bound)"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: 1.1584
+          source: "paper Problem 6.44 (set U_2 of 54265 integers: 1.1584 <= C); notebook sums_differences_problems.ipynb cell 10 solution_2"
+          note: "not recomputed: |U_2| = 54265 is too large for our quadratic port within the time box. The smaller U_1 (2003 integers, cell 10 solution_1) computes to 1.1479888965092757 (paper: 1.1479)."
+        prior_best_value:
+          value: 1.14465
+          source: "paper eq. (6.14), [158, Theorem 1]"
+        current_best_value:
+          value: 1.173077
+          holder: "Fan Zheng (arXiv:2506.01896)"
+          source: "paper Problem 6.44 ([306]; also Gerbicz 1.173050 [138]); problems/44.html comments"
+        match_tolerance: 1.0e-4
+        verification_tolerance: 1.0e-4
+        other_reported:
+          - {value: 1.1479888965092757, source: "sums_differences_problems.ipynb cell 10 solution_1 (2003 integers), computed; paper: 1.1479"}
+        third_party: []
+
+  - problem_id: 46
+    name: "Minimal triangle density in graphs"
+    tier: 2
+    page: "problems/46.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.46 (page: 'Section 6.27')"
+    status: matched_optimal
+    status_raw: matched_optimal
+    evaluator: pending
+    instances:
+      - id: graphon_area_len20
+        params: {graphons: "rank-1 step graphons as lists of floats", num_lists: 100, max_length: 20}
+        quantity: "area under the Lipschitz (slope-3) envelope of the (edge density, triangle density) points; notebook score = -(area + 10*max_gap)"
+        direction: minimize
+        score_transform: negate
+        alphaevolve_value:
+          value: null
+          source: "experiments/edges_vs_triangles/edges_vs_triangles.ipynb cell 2 (get_score(best_solutions, 20)); paper Problem 6.46"
+          missing_note: "the notebook stores no output for the score and the paper gives no number; computing it needs a port of analyze_density_curve (not done: no evaluator yet). Matched Razborov's exact curve (status matched_optimal)."
+        prior_best_value:
+          value: null
+          source: "paper eq. (6.17) (Razborov, flag algebras)"
+          missing_note: "exact closed-form curve, not a single number"
+        current_best_value:
+          value: null
+          source: "paper eq. (6.17)"
+          missing_note: "optimal closed-form curve C(rho)"
+        match_tolerance: 1.0e-6
+        verification_tolerance: 1.0e-9
+        third_party: []
+
+  - problem_id: 48
+    name: "Heilbronn problem in a fixed bounding box"
+    tier: 1
+    page: "problems/48.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.48 (page: 'Section 6.29'), Figure 26 left"
+    status: world_record
+    status_raw: world_record
+    evaluator: pending
+    instance_note: "AlphaEvolve did not beat any unit-square record; its record is for K = unit-area equilateral triangle, n = 11 (paper Problem 6.48)."
+    instances:
+      - id: triangle_n11
+        params: {n: 11, container: equilateral_triangle_unit_area}
+        quantity: "smallest area of a triangle formed by 3 of the points, normalized by the container area"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: 0.036529889880030156
+          source: "alphaevolve_results mathematical_results.ipynb cell 100 (B.9 found_points), computed with a port of the verification in cell 101; colab cell 99 and paper Fig. 26: '> 0.0365'"
+          note: "No notebook in the problems repo; problems/48.html links the alphaevolve_results colab."
+        prior_best_value:
+          value: 0.036
+          source: "mathematical_results.ipynb cell 99 ('For n=11, the SOTA was 0.036'); paper cites Friedman [130]"
+        current_best_value:
+          value: 0.036529889880030156
+          holder: "AlphaEvolve"
+          source: "status.json world_record; no later improvement found in the page or paper"
+        match_tolerance: 1.0e-9
+        verification_tolerance: 1.0e-12
+        third_party:
+          - system: OpenEvolve
+            value: null
+            comparable: true
+            source: "https://github.com/algorithmicsuperintelligence/openevolve/tree/main/examples/alphaevolve_math_problems/heilbronn_triangle"
+            missing_note: "OpenEvolve ships an evaluator (BENCHMARK = 0.036529889880030156, i.e. AlphaEvolve's value) but reports no result for it in its READMEs."
+          - system: ShinkaEvolve
+            value: null
+            comparable: true
+            source: "https://github.com/SakanaAI/ShinkaEvolve (README); arXiv:2509.19349v1"
+            missing_note: "no Heilbronn result in the README, repo tree or paper"
+          - system: GEPA optimize_anything
+            value: null
+            comparable: true
+            source: "gepa-ai/gepa docs/docs/blog/posts/2026-02-18-introducing-optimize-anything; repo tree"
+            missing_note: "no Heilbronn result in the blog post or repo"
+
+  - problem_id: 50
+    name: "Max to min ratios"
+    tier: 1
+    page: "problems/50.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.50 (page: 'Section 6.30'), Figure 27"
+    status: world_record
+    status_raw: world_record
+    evaluator: pending
+    instance_note: "Values are the SQUARED max/min distance ratio (Friedman's and the colab's convention). OpenEvolve's evaluator maximizes 1/ratio^2: convert before comparing."
+    instances:
+      - id: d2_n16
+        params: {d: 2, n: 16}
+        quantity: "(max pairwise distance / min pairwise distance)^2"
+        direction: minimize
+        score_transform: negate
+        alphaevolve_value:
+          value: 12.88926611203463
+          source: "alphaevolve_results mathematical_results.ipynb cell 93 (construction_1), computed as in cell 94; colab cell 92 and paper Problem 6.50: ratio ~ sqrt(12.889266112)"
+        prior_best_value:
+          value: 12.89
+          source: "mathematical_results.ipynb cell 92 (best known sqrt(12.89), Friedman maxmin page)"
+        current_best_value:
+          value: 12.88926611203463
+          holder: "AlphaEvolve"
+          source: "status.json world_record; no later improvement found"
+        match_tolerance: 1.0e-8
+        verification_tolerance: 1.0e-10
+        third_party:
+          - system: OpenEvolve
+            value: null
+            comparable: true
+            source: "https://github.com/algorithmicsuperintelligence/openevolve/tree/main/examples/alphaevolve_math_problems/minimizing_max_min_dist/2"
+            missing_note: "evaluator only (BENCHMARK = 1/12.889266112); no reported result"
+          - system: ShinkaEvolve
+            value: null
+            comparable: true
+            source: "https://github.com/SakanaAI/ShinkaEvolve; arXiv:2509.19349v1"
+            missing_note: "no max/min-ratio result found"
+          - system: GEPA optimize_anything
+            value: null
+            comparable: true
+            source: "gepa-ai/gepa optimize_anything blog post (2026-02-18)"
+            missing_note: "no max/min-ratio result found"
+      - id: d3_n14
+        params: {d: 3, n: 14}
+        quantity: "(max pairwise distance / min pairwise distance)^2"
+        direction: minimize
+        score_transform: negate
+        alphaevolve_value:
+          value: 4.1658497672256525
+          source: "alphaevolve_results mathematical_results.ipynb cell 96 (construction_2), computed as in cell 97; paper Problem 6.50: ratio ~ sqrt(4.165849767)"
+        prior_best_value:
+          value: 4.168
+          source: "mathematical_results.ipynb cell 92 (best known sqrt(4.168), Friedman maxmin3 page)"
+        current_best_value:
+          value: null
+          holder: "Timo Berthold (FICO)"
+          source: "paper Problem 6.50 ('The latter was later improved further in [25]')"
+          missing_note: "the improved value is not stated in the paper and the FICO blog could not be retrieved"
+        match_tolerance: 1.0e-8
+        verification_tolerance: 1.0e-10
+        third_party:
+          - system: OpenEvolve
+            value: null
+            comparable: true
+            source: "https://github.com/algorithmicsuperintelligence/openevolve/tree/main/examples/alphaevolve_math_problems/minimizing_max_min_dist/3"
+            missing_note: "evaluator only; no reported result"
+          - system: ShinkaEvolve
+            value: null
+            comparable: true
+            source: "https://github.com/SakanaAI/ShinkaEvolve; arXiv:2509.19349v1"
+            missing_note: "no max/min-ratio result found"
+          - system: GEPA optimize_anything
+            value: null
+            comparable: true
+            source: "gepa-ai/gepa optimize_anything blog post (2026-02-18)"
+            missing_note: "no max/min-ratio result found"
+
+  - problem_id: 59
+    name: "Subsets of the grid with no isosceles triangles"
+    tier: 1
+    page: "problems/59.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.59 (page: 'Section 6.39'), Figure 30"
+    status: world_record
+    status_raw: world_record
+    evaluator: pending
+    instance_note: "The notebook uses 0-based coordinates {0..n-1}^2; the page defines [n]^2 = {1..n}^2 (equivalent by translation). The validity check must be exact integer arithmetic."
+    instances:
+      - id: grid64
+        params: {n: 64}
+        quantity: "size of a subset of the n x n grid with no (possibly flat) isosceles triangle"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: 112
+          source: "experiments/subsets_of_the_grid_with_no_isosceles_triangles/...ipynb cell 1 (sol_64: 112 points, re-verified exactly with integer squared distances); paper Problem 6.59"
+        prior_best_value: {value: 110, source: "paper Problem 6.59 ([56])"}
+        current_best_value: {value: 112, holder: "AlphaEvolve", source: "status.json world_record; paper Problem 6.59"}
+        match_tolerance: 0.5
+        verification_tolerance: 0.0
+        third_party: []
+      - id: grid100
+        params: {n: 100}
+        quantity: "subset size"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: 164
+          source: "subsets_of_the_grid_with_no_isosceles_triangles.ipynb cell 1 (sol_100: 164 points, re-verified exactly); paper Problem 6.59"
+        prior_best_value: {value: 160, source: "paper Problem 6.59 ([56])"}
+        current_best_value: {value: 164, holder: "AlphaEvolve", source: "paper Problem 6.59", note: "authors believe it is not optimal"}
+        match_tolerance: 0.5
+        verification_tolerance: 0.0
+        third_party: []
+
+  - problem_id: 62
+    name: "The moving sofa problem"
+    tier: 2
+    page: "problems/62.html"
+    paper_ref: "arXiv:2511.02864v3 Problem 6.62 (page: 'Section 6.42')"
+    status: matched_optimal
+    status_raw: matched_optimal
+    evaluator: pending
+    instances:
+      - id: classic_sofa
+        params: {corridor: "L-shaped, unit width, single 90-degree turn", path_endpoints: "[0,0,0] -> [-2,0,90]"}
+        quantity: "area of the intersection of the moving corridor along the path (notebook calculate_intersection_area, shapely)"
+        direction: maximize
+        score_transform: identity
+        alphaevolve_value:
+          value: 2.2192697096945855
+          source: "experiments/the_2d_moving_sofa/the_2d_moving_sofa.ipynb cell 8 stored output ('AlphaEvolve's approximation of Gerver's sofa')"
+          note: "taken from the stored cell output, not recomputed (needs shapely). Notebook warns sofas may clip the corridor slightly due to discrete steps."
+        prior_best_value:
+          value: 2.2195
+          source: "paper Problem 6.62 (Gerver's sofa, C >= 2.2195...)"
+          note: "truncated by the source"
+        current_best_value:
+          value: 2.2195
+          holder: "Gerver (optimal, proved by Baek)"
+          source: "paper Problem 6.62 ('C = 2.2195...')"
+          note: "truncated by the source"
+        match_tolerance: 1.0e-4
+        verification_tolerance: 1.0e-9
+        third_party: []

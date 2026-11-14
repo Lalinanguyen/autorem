@@ -38,7 +38,11 @@ def execute(cfg: RunConfig, *, mock_llm: bool = False, out_dir: str | None = Non
         evaluator = ModalEvaluator(evaluator)
 
     policy = make_policy(cfg.sleep_policy, cfg.policy_params)
-    return run(cfg, evaluator, llm, policy, out_dir=out_dir)
+    summary = run(cfg, evaluator, llm, policy, out_dir=out_dir)
+
+    from benchmarks.scoring import enrich_after_run  # adds the `alphaevolve` block to summary.json
+
+    return enrich_after_run(summary, out_dir or cfg.out_dir)
 
 
 def main() -> None:

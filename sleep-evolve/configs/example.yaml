@@ -5,16 +5,57 @@ total_token_budget: 2000000   # agent + sleep tokens, one shared total
 max_steps: 500
 k_recent: 5                    # last K steps shown to the agent
 max_completion_tokens: 8192
+context_cap_tokens: 8000         # agent prompt cap (local counter ~ utf8 bytes / 3), all policies
+awake_tags: true               # awake header for EVERY policy: matched prompts, and calibration
+                               # (the main fatigue signal) needs EXPECTED_SCORE in every arm
 
-sleep_policy: summarize        # no_sleep | summarize | full_sleep (stub)
+sleep_policy: summarize        # no_sleep | summarize | full_sleep | sleep_lite
 sleep_policies:                # params per policy; only the selected entry is used
   no_sleep: {}
   summarize:
     every_n: 10
     max_block_tokens: 1024
   full_sleep:
-    every_n: 10
+    every_n: 10                # fixed schedule, used only when pressure: false
+    max_block_tokens: 2048     # cap on the rendered memory section
+    context_cap_tokens: null   # optional tighter cap on the whole agent prompt
+    awake_tags: true           # APPROACH_TAGS / EXPECTED_SCORE / RATIONALE / RELEVANT_MEMORY header
+    decay: true
+    decay_factor: 0.9
+    eviction: true
+    min_strength: 0.05
+    max_items: 40
+    pressure: true             # pressure-gated sleep (stall, perseveration, clutter, surprise)
+    pressure_threshold: 0.5
+    min_gap: 5
+    max_gap: 25
+    scheduler: true            # NREM vs REM by plateau / budget fraction
+    plateau_window: 15
+    late_budget_fraction: 0.8
+    replay: true               # coupled replay through the evaluator sandbox
+    replay_budget: 2
+    rem_replay_budget: 1
+    schema: false              # REM-only schema store
+    schema_persist: false      # persisting schemas across runs leaks knowledge between runs
+    gating: fatigue            # fatigue | pressure | fixed
+    max_depth: nrem_rem
+    respond_drowsy: true       # drowsy -> code-only forgetting (zero LLM calls)
+    forget_min_gap: 3
+    forget_error_chars: 80
+    forget_dead_end_gain: 0.1
+    min_sleep_budget_tokens: 8192   # defer a sleep (debt) when less remains
+    defer_fallback_forget: true
+    wake_recent_steps: 2       # "the last couple of steps" kept after a sleep
+    wake_min_strength: 0.1     # goal-relevant memory floor
+  sleep_lite:                  # drowsy response only; never a sleep LLM call
     max_block_tokens: 2048
+    awake_tags: true
+    respond_drowsy: true
+    forget_min_gap: 3
+    forget_error_chars: 80
+    forget_dead_end_gain: 0.1
+    wake_recent_steps: 2
+    wake_min_strength: 0.1
 
 eval_backend: local            # local (subprocess) | modal (requires: modal deploy infra/modal_eval.py)
 eval_timeout_s: 60
@@ -27,3 +68,67 @@ serve:
   max_model_len: 32768
 
 out_dir: runs
+
+# Fatigue monitor (harness/fatigue.py). Measured and logged for EVERY arm (no_sleep included);
+# policies only read the level. Every threshold, weight, window, cap and grace length is here.
+fatigue:
+  enabled: true
+  skip_seed_step: true          # step 0 (seed, no LLM call) is not an agent step
+  round_digits: 6
+  # load (homeostatic pressure): agent tokens since the last sleep
+  load_tokens_scale: 300000   # tokens that give load 1.0 (linear)
+  load_budget_fraction: null    # or: scale = fraction * total_token_budget
+  load_curve: linear            # linear | saturating (1 - exp(-t/scale))
+  load_cap: 1.0
+  load_relief: {forget: 0.2, nrem: 0.6, nrem_rem: 0.9}   # fraction of load removed per depth
+  # rested baseline (re-measured after every sleep) and rolling window, in agent steps
+  baseline_steps: 5
+  window: 5
+  forget_resets_baseline: false
+  improvement_min_delta: 0.0
+  # impairment components (each normalized to [0, 1])
+  calibration_floor: 0.01       # min baseline |expected - score| gap
+  calibration_ratio_cap: 4.0    # gap ratio vs baseline that maps to 1.0
+  calibration_invalid_gap: null # gap charged to an invalid step with a prediction; null = skip
+  calibration_score_scale: null # null = |best_known|
+  calibration_min_samples: 2
+  perseveration_match: 0.5      # |tags & failed tags| / |failed tags|
+  perseveration_failure: no_improvement   # invalid | no_improvement
+  perseveration_lookback: null
+  stagnation_steps_norm: 20
+  stagnant_threshold: 0.75      # tired + stagnation >= this -> NREM+REM
+  sloppiness_floor: 0.05
+  sloppiness_ratio_cap: 4.0
+  parse_failure_patterns: ["code block"]
+  timeout_patterns: ["timeout", "timed out"]
+  header_expected: auto         # missing awake header = parse failure: auto | always | never
+  narrowing_tag_weight: 0.5
+  narrowing_similarity_weight: 0.5
+  narrowing_min_samples: 2
+  similarity_token_regex: '\w+'
+  context_soft_cap: 8000
+  bloat_cap: 1.0
+  # mix: fatigue = load_weight * load + impairment_weight * impairment + debt
+  impairment_weights: {calibration: 0.35, perseveration: 0.15, stagnation: 0.15, sloppiness: 0.15, narrowing: 0.1, bloat: 0.1}
+  renormalize_missing: true
+  load_weight: 0.4
+  impairment_weight: 0.6
+  # levels
+  drowsy_threshold: 0.3
+  tired_threshold: 0.5
+  exhausted_threshold: 0.75
+  hysteresis_margin: 0.05
+  wake_threshold: 0.25          # after a sleep, fatigue must drop below this to reach tired again
+  rearm_max_steps: 20
+  grace_steps: 3                # always rested for this many steps after waking
+  # sleep debt (deferred sleeps)
+  debt_increment: 0.1
+  debt_cap: 0.5
+  debt_relief: {forget: 0.0, nrem: 0.5, nrem_rem: 1.0}
+  debt_deepen_threshold: 1.0e-09
+  offline_default_depth: nrem   # depth assumed for sleeps of policies that do not report one
+  validation:                   # analysis/fatigue_check.py
+    horizon_k: 5
+    auc_margin: 0.05
+    arm: no_sleep
+    min_samples: 10

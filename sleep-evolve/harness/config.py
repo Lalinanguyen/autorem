@@ -8,6 +8,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field
 
+from harness.fatigue import FatigueConfig
+
 
 class ServeConfig(BaseModel):
     """Settings for infra/modal_vllm.py (the optional self-hosted endpoint)."""
@@ -18,6 +20,20 @@ class ServeConfig(BaseModel):
     max_model_len: int = 32768
 
 
+class MetricsConfig(BaseModel):
+    """Per-run summary metrics (harness/metrics.py), written to summary.json["metrics"]."""
+
+    model_config = {"extra": "forbid"}
+
+    checkpoints: list[float] = Field(
+        default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 1.0],
+        description="budget fractions at which the best-so-far normalized score is reported")
+    thresholds: list[float] = Field(
+        default_factory=lambda: [0.95, 0.99],
+        description="normalized-score targets: fraction of budget used to first reach each")
+    window: int = Field(5, gt=0, description="agent steps before / after each sleep for behavior rates")
+
+
 class RunConfig(BaseModel):
     problem_id: int
     seed: int = 0
@@ -25,10 +41,23 @@ class RunConfig(BaseModel):
     max_steps: int = Field(gt=0)
     k_recent: int = Field(5, ge=0, description="last K steps shown to the agent")
     max_completion_tokens: int = 4096
+    context_cap_tokens: int | None = Field(
+        8000, gt=0, description="cap on the agent prompt (local counter, harness/context.py); None = uncapped"
+    )
+    awake_tags: bool | None = Field(
+        None, description="ask the agent for the APPROACH_TAGS/... header; None = the policy decides (default off)"
+    )
     sleep_policy: str = "no_sleep"
     sleep_policies: dict[str, dict[str, Any]] = Field(
         default_factory=dict, description="per-policy params; the selected policy's entry is used"
     )
+    fatigue: FatigueConfig = Field(
+        default_factory=FatigueConfig,
+        description="fatigue monitor (harness/fatigue.py): computed and logged for every arm; policies only read it",
+    )
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    baseline_arm: str | None = Field(
+        None, description="baseline-suite arm name (harness/baselines.py); names the run and the summary's arm")
     eval_backend: Literal["local", "modal"] = "local"
     eval_timeout_s: int | None = None  # override the evaluator's default
     model: str | None = Field(
@@ -44,7 +73,7 @@ class RunConfig(BaseModel):
         return dict(self.sleep_policies.get(self.sleep_policy, {}))
 
     def resolved_run_id(self) -> str:
-        return self.run_id or f"p{self.problem_id}_{self.sleep_policy}_s{self.seed}"
+        return self.run_id or f"p{self.problem_id}_{self.baseline_arm or self.sleep_policy}_s{self.seed}"
 
 
 def load_dotenv(path: str | Path = ".env") -> None:

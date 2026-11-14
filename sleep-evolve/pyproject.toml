@@ -12,11 +12,25 @@ dependencies = [
 ]
 
 [dependency-groups]
+analysis = [
+    "matplotlib>=3.8",
+]
 dev = ["pytest>=8.0"]
+# Optional: arms/gepa_arm.py, arms/gepa_sleep_arm.py (gepa core has no dependencies; LLM calls use our proxy, not litellm)
+gepa = [
+    "gepa>=0.1.4",
+]
 
 [tool.uv]
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests.py"]
+python_files = ["tests.py"]
 pythonpath = ["."]
+markers = [
+    "llm: needs a real OpenAI-compatible LLM endpoint (LLM_BASE_URL/LLM_API_KEY/LLM_MODEL); skipped unless RUN_LIVE=1",
+    "modal: needs Modal credentials and deployed apps (infra/modal_eval.py, infra/modal_vllm.py); skipped unless RUN_LIVE=1",
+    "pastdev: needs past.dev (PASTDEV_API_KEY); skipped unless RUN_LIVE=1",
+    "slow: long live run; skipped unless RUN_LIVE=1",
+]

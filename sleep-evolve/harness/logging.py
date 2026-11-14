@@ -15,6 +15,43 @@ Line schema (every key always present):
   wallclock      float  seconds since run start
   event          "step" | "sleep"
   details        dict   evaluator details (step) or {"policy", "block"} (sleep)
+  side_info      dict   EvalResult.side_info: actionable evaluator diagnostics ({} for sleep events)
+
+Awake / sleep metrics (always present; null when the policy or event does not produce them):
+  approach_tags     list[str] | null  step: tags from the agent's APPROACH_TAGS header line
+  expected_score    float | null      step: the agent's EXPECTED_SCORE prediction
+  rationale         str | null        step: RATIONALE header line (<= 500 chars)
+  relevant_memory   list[str] | null  step: memory ids from RELEVANT_MEMORY
+  surprise          float | null      step: |score - expected| / |best_known|; 1.0 if invalid with a
+                                      prediction; null without a prediction
+  perseveration_hit bool | null       step: tags matched a dead-end memory item (policy observe hook)
+  context_tokens    int | null        step: local-counter size of the agent prompt (harness/context.py)
+  pressure          float | null      step: sleep pressure after this step; sleep: pressure at sleep time
+  sleep_mode        "nrem"|"rem"|null sleep
+  block_tokens      int | null        sleep: local-counter size of the new block / memory section
+  items_added       int | null        sleep: memory items created
+  items_evicted     int | null        sleep: memory items evicted
+  replays_wasted    int | null        sleep: replays that decided no memory edit
+
+Fatigue (harness/fatigue.py; every arm, every line; null when fatigue is disabled or the writer,
+e.g. a GEPA arm, does not run the monitor). Step lines carry the state observed at that step plus
+the sleep decision taken after it; sleep lines carry the state right after the sleep.
+  fatigue                 float  load_weight*load + impairment_weight*impairment + debt
+  fatigue_load            float  homeostatic load in [0, load_cap]
+  fatigue_impairment      float  weighted mean of the components below, in [0, 1]
+  fatigue_calibration     float | null   each component in [0, 1]; 0 until the rested baseline
+  fatigue_perseveration   float | null   exists, null when the log lacks the data
+  fatigue_stagnation      float | null
+  fatigue_sloppiness      float | null
+  fatigue_narrowing       float | null
+  fatigue_bloat           float | null
+  fatigue_level           "rested" | "drowsy" | "tired" | "exhausted"
+  fatigue_debt            float  sleep debt (from deferred sleeps)
+  fatigue_grace           bool   inside the post-wake grace period
+  fatigue_baseline_ready  bool   the rested baseline has been measured since the last wake
+  sleep_triggered         bool   a sleep/forget of depth >= forget ran after this step
+  sleep_deferred          bool   a due sleep was deferred after this step (debt added)
+  sleep_depth             "forget" | "nrem" | "nrem_rem" | null
 
 `details` is an addition to the spec'd schema: it carries the consolidated block so
 masked-prediction and analysis (tasks 5 and 8) can replay what the agent saw.
@@ -28,9 +65,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from harness.fatigue import FATIGUE_FIELDS
+
 FIELDS = (
     "run_id", "step", "parent_id", "program_id", "program", "score", "valid", "error",
-    "delta_vs_best", "agent_tokens", "sleep_tokens", "wallclock", "event", "details",
+    "delta_vs_best", "agent_tokens", "sleep_tokens", "wallclock", "event", "details", "side_info",
+    "approach_tags", "expected_score", "rationale", "relevant_memory", "surprise", "perseveration_hit",
+    "context_tokens", "pressure", "sleep_mode", "block_tokens", "items_added", "items_evicted",
+    "replays_wasted",
+    *FATIGUE_FIELDS,
 )
 
 
@@ -47,13 +90,27 @@ class RunLogger:
         self._t0 = time.monotonic()
 
     def log(self, **fields: Any) -> dict:
+        return self.write(self.build(**fields))
+
+    def build(self, **fields: Any) -> dict:
+        """The normalized record for `fields` (validated, not yet written)."""
         record = {k: None for k in FIELDS}
         record.update(fields)
         record["run_id"] = self.run_id
         record["wallclock"] = round(time.monotonic() - self._t0, 4)
         record["score"] = _finite_or_none(record["score"])
         record["delta_vs_best"] = _finite_or_none(record["delta_vs_best"])
+        record["expected_score"] = _finite_or_none(record["expected_score"])
+        record["surprise"] = _finite_or_none(record["surprise"])
         record["details"] = record["details"] or {}
+        record["side_info"] = record["side_info"] or {}
+        unknown = set(record) - set(FIELDS)
+        if unknown:
+            raise ValueError(f"unknown log fields: {unknown}")
+        return record
+
+    def write(self, record: dict) -> dict:
+        """Append a record from build() (possibly updated with known fields) to the file."""
         unknown = set(record) - set(FIELDS)
         if unknown:
             raise ValueError(f"unknown log fields: {unknown}")

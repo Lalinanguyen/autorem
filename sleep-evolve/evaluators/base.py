@@ -30,6 +30,9 @@ class EvalResult(BaseModel):
     valid: bool
     error: str | None = None
     details: dict = Field(default_factory=dict)
+    # Actionable diagnostics for the proposer (violations, overlap/slack values, ASCII render, ...).
+    # Shown to the agent and logged for every arm. Must be JSON-serializable.
+    side_info: dict = Field(default_factory=dict)
 
 
 @runtime_checkable
@@ -46,7 +49,16 @@ class Evaluator(Protocol):
 
 
 class ProgramFailed(Exception):
-    """The program crashed, timed out, or returned something that is not JSON data."""
+    """The program crashed, timed out, or returned something that is not JSON data.
+
+    `kind` classifies the failure for side_info: "timeout", "crash", "no_result" or
+    "bad_output". `output_tail` is the end of the child's stderr/stdout (crash only).
+    """
+
+    def __init__(self, message: str, kind: str = "crash", output_tail: str = ""):
+        super().__init__(message)
+        self.kind = kind
+        self.output_tail = output_tail
 
 
 def normalized_score(score: float | None, best_known: float) -> float | None:
@@ -65,8 +77,27 @@ def normalized_score(score: float | None, best_known: float) -> float | None:
     return best_known / score if score != 0 else None
 
 
-def invalid(error: str, **details: Any) -> EvalResult:
-    return EvalResult(score=INVALID_SCORE, valid=False, error=error, details=details)
+def invalid(error: str, *, side_info: dict | None = None, **details: Any) -> EvalResult:
+    return EvalResult(score=INVALID_SCORE, valid=False, error=error, details=details, side_info=side_info or {})
+
+
+_FAILURE_HINTS = {
+    "timeout": "construct() did not finish in time: reduce iterations or use vectorized numpy.",
+    "crash": "the program raised or exited non-zero: see stderr_tail for the traceback.",
+    "no_result": "the program ran but wrote no result: construct() must return the solution.",
+    "bad_output": "construct() returned something that is not JSON data (lists/numbers/dicts).",
+}
+_SIDE_INFO_TAIL = 800  # chars of child output kept in side_info
+
+
+def failure_side_info(e: "ProgramFailed", timeout_s: float | None = None) -> dict:
+    """Structured side_info for a program that never produced a scorable solution."""
+    info: dict[str, Any] = {"stage": "run", "failure": e.kind, "hint": _FAILURE_HINTS.get(e.kind, "")}
+    if e.kind == "timeout" and timeout_s is not None:
+        info["timeout_s"] = timeout_s
+    if e.output_tail:
+        info["stderr_tail"] = e.output_tail[-_SIDE_INFO_TAIL:]
+    return info
 
 
 def run_program(program: str, timeout_s: float) -> Any:
@@ -101,16 +132,16 @@ def run_program(program: str, timeout_s: float) -> Any:
         except subprocess.TimeoutExpired:
             _kill_tree(proc)
             proc.communicate()
-            raise ProgramFailed(f"timeout after {timeout_s}s")
+            raise ProgramFailed(f"timeout after {timeout_s}s", kind="timeout")
         if proc.returncode != 0:
             tail = (stderr or stdout or "")[-_OUTPUT_TAIL:]
-            raise ProgramFailed(f"exit code {proc.returncode}: {tail}")
+            raise ProgramFailed(f"exit code {proc.returncode}: {tail}", kind="crash", output_tail=tail)
         if not out_path.exists():
-            raise ProgramFailed("program produced no result")
+            raise ProgramFailed("program produced no result", kind="no_result")
         try:
             return json.loads(out_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
-            raise ProgramFailed(f"result is not valid JSON: {e}")
+            raise ProgramFailed(f"result is not valid JSON: {e}", kind="bad_output")
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -152,8 +183,12 @@ class SubprocessEvaluator:
         try:
             solution = run_program(program, self.timeout_s)
         except ProgramFailed as e:
-            return invalid(str(e))
+            return invalid(str(e), side_info=failure_side_info(e, self.timeout_s))
         try:
             return self.score_solution(solution)
         except Exception as e:  # malformed solution shapes etc.
-            return invalid(f"scoring failed: {type(e).__name__}: {e}")
+            return invalid(
+                f"scoring failed: {type(e).__name__}: {e}",
+                side_info={"stage": "score", "failure": "exception", "exception": type(e).__name__,
+                           "message": str(e)[:_SIDE_INFO_TAIL], "solution_type": type(solution).__name__},
+            )

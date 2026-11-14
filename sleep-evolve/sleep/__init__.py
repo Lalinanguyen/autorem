@@ -6,6 +6,7 @@ from typing import Any
 
 from sleep.base import SleepPolicy
 from sleep.full import FullSleep
+from sleep.lite import SleepLite
 from sleep.no_sleep import NoSleep
 from sleep.summarize import Summarize
 
@@ -13,6 +14,7 @@ REGISTRY: dict[str, type] = {
     NoSleep.name: NoSleep,
     Summarize.name: Summarize,
     FullSleep.name: FullSleep,
+    SleepLite.name: SleepLite,
 }
 
 

@@ -33,9 +33,27 @@ class MockEvaluator(SubprocessEvaluator):
 
     def score_solution(self, solution: Any) -> EvalResult:
         if not isinstance(solution, list) or len(solution) != DIM:
-            return invalid(f"expected a list of {DIM} numbers")
-        xs = [float(v) for v in solution]
+            got = {"got_type": type(solution).__name__}
+            if isinstance(solution, (list, dict)):
+                got["got_len"] = len(solution)
+            return invalid(
+                f"expected a list of {DIM} numbers",
+                side_info={"stage": "shape", "expected": f"list of {DIM} floats", **got},
+            )
+        try:
+            xs = [float(v) for v in solution]
+        except (TypeError, ValueError):
+            bad = [i for i, v in enumerate(solution) if not isinstance(v, (int, float))]
+            return invalid("non-numeric value", side_info={"stage": "shape", "non_numeric_indices": bad})
         if not all(math.isfinite(v) for v in xs):
-            return invalid("non-finite value")
-        score = 1.0 - sum((v - TARGET) ** 2 for v in xs) / DIM
-        return EvalResult(score=score, valid=True)
+            bad = [i for i, v in enumerate(xs) if not math.isfinite(v)]
+            return invalid("non-finite value", side_info={"stage": "constraint", "non_finite_indices": bad})
+        sq = [(v - TARGET) ** 2 for v in xs]
+        score = 1.0 - sum(sq) / DIM
+        worst = max(range(DIM), key=lambda i: sq[i])
+        side_info = {
+            "per_coordinate_sq_error": [round(e, 6) for e in sq],
+            "worst_coordinate": worst,
+            "mean_sq_error": round(sum(sq) / DIM, 6),
+        }
+        return EvalResult(score=score, valid=True, side_info=side_info)
