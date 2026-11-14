@@ -1,0 +1,154 @@
+# DEBUG / plumbing check on the OpenAI API: gpt-5-nano, p36, 1 seed, no_sleep + fatigue, small budget.
+# Pre-flight (conservative: every token at the output price): 2 runs x (200,000 + 32,384) x $0.40/1M = $0.19.
+#   uv run python -m scripts.run_matrix --config configs/debug_openai.yaml --estimate-only
+#   uv run python -m scripts.run_matrix --config configs/debug_openai.yaml --out-dir runs/debug_openai
+# Needs LLM_BASE_URL=https://api.openai.com/v1, LLM_API_KEY, LLM_MODEL=gpt-5-nano.
+problem_id: 36
+seed: 0
+total_token_budget: 200000  # agent + sleep tokens, one shared total, same in every arm
+max_steps: 100000              # budget, not steps, ends every arm
+k_recent: 5
+max_completion_tokens: 16384    # includes reasoning tokens on reasoning models
+context_cap_tokens: 8000       # the SAME wake-context cap in every arm (no_sleep fills it with raw steps)
+awake_tags: true               # required in every arm
+
+sleep_policy: full_sleep       # the base runs as the fatigue arm if used directly with run_one
+sleep_policies:
+  full_sleep:                  # SHARED sleep settings: identical in every sleeping arm. Arms only change
+                               # their declared trigger params (harness/baselines.py ARM_SPECS).
+    every_n: 10                # (trigger; fixed arms declare their own)
+    consolidator_max_tokens: 8192   # includes reasoning tokens: 2048 can leave no visible JSON
+    max_block_tokens: 2048
+    context_cap_tokens: null   # must stay null: the context cap is the run-level one, same for no_sleep
+    awake_tags: true
+    decay: true
+    decay_factor: 0.9
+    eviction: true
+    min_strength: 0.05
+    max_items: 40
+    pressure: true             # pressure is computed and logged only (no arm gates on it)
+    pressure_threshold: 0.5
+    min_gap: 5
+    max_gap: 25
+    scheduler: true            # unused for depth: fatigue picks tiers, fixed arms force nrem
+    plateau_window: 15
+    late_budget_fraction: 0.8
+    replay: true
+    replay_budget: 2
+    rem_replay_budget: 1
+    schema: false
+    schema_persist: false
+    gating: fatigue            # (trigger; declared per arm)
+    timed_depth: nrem          # (trigger depth; declared per arm)
+    max_depth: nrem_rem
+    respond_drowsy: true
+    forget_min_gap: 3
+    forget_error_chars: 80
+    forget_dead_end_gain: 0.1
+    min_sleep_budget_tokens: 8192
+    defer_fallback_forget: true
+    wake_recent_steps: 2
+    wake_min_strength: 0.1
+
+baselines:
+  arms: [fatigue, no_sleep]
+  problems: [36]               # run_matrix defaults (CLI --problems / --seeds win)
+  seeds: [0]
+  arm_params:                  # values for DECLARED params only (anything else fails the drift check)
+    fixed_letta: {every_n: 5}
+    fixed_sparse: {every_n: 20}
+    fixed_tiered: {every_n: 5}   # variant; add fixed_tiered to `arms` to run it
+  overrides: {}                # per-arm RunConfig overrides: any entry fails the drift check
+  matching:
+    min_gap: null              # min steps between matched sleeps; null = fatigue.grace_steps + 1
+    seed_salt: random_matched  # random_matched schedule seed = salt|p<problem>|s<seed>
+
+metrics:                       # summary.json["metrics"] (harness/metrics.py)
+  checkpoints: [0.1, 0.25, 0.5, 0.75, 1.0]
+  thresholds: [0.95, 0.99]
+  window: 5                    # agent steps before / after each sleep for behavior rates
+
+eval_backend: local
+eval_timeout_s: 60
+model: gpt-5-nano                # expected LLM_MODEL (run_matrix refuses on a mismatch); every arm, agent + sleep
+llm:                           # request parameters (llm/chat_params.py); identical for agent and sleep calls in
+                               # every arm (the drift check asserts it). null = env var, then auto by model name.
+  token_param: auto            # auto -> max_completion_tokens for gpt-5* / o-series (max_tokens is not accepted by
+                               # o-series models and is deprecated), max_tokens for other models (vLLM fallback)
+  reasoning_effort: low        # documented Chat Completions value (none|minimal|low|medium|high|xhigh|max; not every
+                               # model accepts every value). "low" is accepted by every GPT-5-family / o-series
+                               # model, keeps reasoning tokens (billed as output, counted in the budget) small, and
+                               # leaves room for the program in max_completion_tokens. Same in every arm by construction.
+  temperature: null            # not sent: reasoning models reject temperature/top_p unless reasoning_effort is none
+  reasoning_model: null        # null = auto-detect from the model name
+prices:                        # USD per 1M tokens (harness/cost.py; null = unknown -> cost unknown, pre-flight refuses)
+  gpt-5-nano: {input: 0.05, cached_input: 0.005, output: 0.40, checked: "2026-11-14",
+               source: "https://developers.openai.com/api/docs/pricing (Standard, text)"}
+  gpt-5-mini: {input: 0.25, cached_input: 0.025, output: 2.00, checked: "2026-11-14",
+               source: "https://developers.openai.com/api/docs/pricing (Standard, text)"}
+max_dollars: 2               # run_matrix pre-flight cap on the conservative estimate (--max-dollars overrides)
+out_dir: runs
+
+# Fatigue monitor (harness/fatigue.py). Measured and logged for EVERY arm (no_sleep included);
+# policies only read the level. Every threshold, weight, window, cap and grace length is here.
+fatigue:
+  enabled: true
+  skip_seed_step: true          # step 0 (seed, no LLM call) is not an agent step
+  round_digits: 6
+  # load (homeostatic pressure): agent tokens since the last sleep
+  load_tokens_scale: 300000   # (unused: load_budget_fraction is set)
+  load_budget_fraction: 0.15    # scale = 0.15 * total_token_budget (as 300000 / 2M in baselines.yaml)
+  load_curve: linear            # linear | saturating (1 - exp(-t/scale))
+  load_cap: 1.0
+  load_relief: {forget: 0.2, nrem: 0.6, nrem_rem: 0.9}   # fraction of load removed per depth
+  # rested baseline (re-measured after every sleep) and rolling window, in agent steps
+  baseline_steps: 5
+  window: 5
+  forget_resets_baseline: false
+  improvement_min_delta: 0.0
+  # impairment components (each normalized to [0, 1])
+  calibration_floor: 0.01       # min baseline |expected - score| gap
+  calibration_ratio_cap: 4.0    # gap ratio vs baseline that maps to 1.0
+  calibration_invalid_gap: null # gap charged to an invalid step with a prediction; null = skip
+  calibration_score_scale: null # null = |best_known|
+  calibration_min_samples: 2
+  perseveration_match: 0.5      # |tags & failed tags| / |failed tags|
+  perseveration_failure: no_improvement   # invalid | no_improvement
+  perseveration_lookback: null
+  stagnation_steps_norm: 20
+  stagnant_threshold: 0.75      # tired + stagnation >= this -> NREM+REM
+  sloppiness_floor: 0.05
+  sloppiness_ratio_cap: 4.0
+  parse_failure_patterns: ["code block"]
+  timeout_patterns: ["timeout", "timed out"]
+  header_expected: auto         # missing awake header = parse failure: auto | always | never
+  narrowing_tag_weight: 0.5
+  narrowing_similarity_weight: 0.5
+  narrowing_min_samples: 2
+  similarity_token_regex: '\w+'
+  context_soft_cap: 8000
+  bloat_cap: 1.0
+  # mix: fatigue = load_weight * load + impairment_weight * impairment + debt
+  impairment_weights: {calibration: 0.35, perseveration: 0.15, stagnation: 0.15, sloppiness: 0.15, narrowing: 0.1, bloat: 0.1}
+  renormalize_missing: true
+  load_weight: 0.4
+  impairment_weight: 0.6
+  # levels
+  drowsy_threshold: 0.3
+  tired_threshold: 0.5
+  exhausted_threshold: 0.75
+  hysteresis_margin: 0.05
+  wake_threshold: 0.25          # after a sleep, fatigue must drop below this to reach tired again
+  rearm_max_steps: 20
+  grace_steps: 3                # always rested for this many steps after waking
+  # sleep debt (deferred sleeps)
+  debt_increment: 0.1
+  debt_cap: 0.5
+  debt_relief: {forget: 0.0, nrem: 0.5, nrem_rem: 1.0}
+  debt_deepen_threshold: 1.0e-09
+  offline_default_depth: nrem   # depth assumed for sleeps of policies that do not report one
+  validation:                   # analysis/fatigue_check.py
+    horizon_k: 5
+    auc_margin: 0.05
+    arm: no_sleep
+    min_samples: 10

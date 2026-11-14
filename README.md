@@ -36,3 +36,10 @@ python -m autorem.agent --workspace path/to/project      # interactive
   Devin runs on its own and every session uses paid ACUs. So the tools never wait for Devin to finish, and Claude uses them only when you ask it to delegate. Without the key, these tools aren't registered.
 - Tests: `python -m tests.test_devin` runs offline. It mocks HTTP, so it makes no real Devin calls.
 - `.claude/skills/build-with-exa` is Exa's integration skill. Claude Code uses it as the reference when changing the Exa code.
+
+## sleep-evolve
+
+A second project in this repo: `sleep-evolve/` is a research harness that tests whether
+sleep-time memory consolidation — including REM-style associative "dreaming" (hypothesis
+generation + sandbox validation) and offline LoRA distillation — helps LLM-driven evolutionary
+program search on AlphaEvolve's math problems. See `sleep-evolve/README.md`.

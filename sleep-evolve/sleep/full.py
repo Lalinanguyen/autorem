@@ -2,14 +2,28 @@
 
 One sleep (`consolidate`):
   1. choose mode (scheduler): NREM (verify) or REM (plateau: generalize; schema update)
-  2. refresh the goal item (best score so far)
-  3. ONE consolidator LLM call (role="sleep"): PRIORITIZE / EXTRACT CLAIMS / PLAN REPLAYS
-     (sleep/consolidator_io.py), parsed robustly; malformed output = zero edits, logged
-  4. coupled replay (sleep/replay.py): each planned replay runs via evaluator.evaluate and
-     decides exactly one Edit, or is counted in replays_wasted
+  2. refresh the goal item g0 (best score so far)
+  3. ONE consolidator LLM call (role="sleep"): PRIORITIZE / EXTRACT CLAIMS / PLAN PAIRED REPLAYS /
+     GOALS / MERGES (sleep/consolidator_io.py), parsed robustly. Output with no JSON object is
+     retried `consolidator_retries` times (default 1) with a short "JSON only" follow-up; still
+     malformed = zero edits, logged
+  4. paired replay (sleep/replay.py): each replay runs a control and a treatment program via
+     evaluator.evaluate and decides exactly one Edit from treatment - control (`replay_margin`,
+     relative), or is counted in replays_wasted; evaluator calls are counted in
+     `replay_evaluations` (details)
   5. claims without a decided replay become tentative edits per `relation`
-  6. decay (items not touched this sleep), evict, optional REM schema abstraction
+  6. merges of near-duplicate items (MemoryStore.merge), then goals: up to `max_goals` one-sentence
+     goals (g1, g2, ...) after g0, each replacing a stale goal or added (oldest pushed out)
+  7. decay (items not touched this sleep; goals never), evict, optional REM schema abstraction
+  8. REM only: dreaming (sleep/dreamer.py) — recombine memory items and steps into novel
+     hypotheses (association / counterfactual / extrapolation), then validate each in the
+     sandbox (sleep/insight_validator.py): a dream is NEVER trusted — confirmed -> verified,
+     refuted -> refuted, uncertain/untested -> tentative; validation evals share the run's
+     EvalBudget through the bound (sleep-tagged) evaluator. Skipped below dream_min_budget_tokens.
 The agent then sees `memory_section(cap)`, the rendered store, never raw history.
+With `memory_path` set, the store is loaded at construction and saved after every consolidate:
+validated discoveries persist across runs and problems (cross-run memory for the dream-ladder's
+distillation arm; a shared file is last-write-wins — not for parallel runs).
 
 Every mechanism has a flag (see DEFAULTS). All LLM calls go through llm.complete(role="sleep");
 BudgetExhausted propagates to the caller.
@@ -47,15 +61,19 @@ from __future__ import annotations
 
 import json
 import math
+import os
+from pathlib import Path
 from typing import Any
 
 from harness.context import count_tokens, fit_lines
 from harness.fatigue import FatigueReading, SleepDepth
 from sleep import pressure as P
 from sleep.consolidator_io import (
-    CONSOLIDATOR_SYSTEM, CONSOLIDATOR_USER, NREM_NOTE, REM_NOTE, parse_json_object, step_view,
-    validate_consolidation,
+    CONSOLIDATOR_SYSTEM, CONSOLIDATOR_USER, NREM_NOTE, REM_NOTE, RETRY_NOTE, parse_json_object, step_view,
+    validate_consolidation, validate_goals_and_merges,
 )
+from sleep.dreamer import Dreamer
+from sleep.insight_validator import validate_dreams as run_dream_tests
 from sleep.memory import Edit, MemoryStore
 from sleep.replay import run_replays
 from sleep.scheduler import choose_mode
@@ -80,12 +98,34 @@ DEFAULTS: dict[str, Any] = {
     "scheduler": True, "plateau_window": 15, "late_budget_fraction": 0.8,
     # consolidator call
     "k_steps": 8, "rem_k_steps": 12, "max_history_steps": 40, "max_claims": 8,
-    "consolidator_max_tokens": 2048,
-    # coupled replay
+    "consolidator_max_tokens": 8192,  # JSON output plus the model's reasoning tokens (gpt-5 reasoning)
+    "consolidator_retries": 1,     # extra calls when the reply has no JSON object (each charged)
+    # paired replay (each replay = up to 2 evaluator calls: control + treatment)
     "replay": True, "replay_budget": 2, "rem_replay_budget": 1, "replay_rel_tol": 1e-6,
+    "replay_margin": 1e-3,         # rule/fact/skill confirmed iff treatment - control > margin * |control|
+    # goals (consolidator-written, after the best-score line g0; never decayed or evicted)
+    "max_goals": 3,
+    "merges": True,                # apply the consolidator's merges of near-duplicate items
     # schema store (REM only)
     "schema": False, "schema_min_strength": 0.6, "schema_min_items": 3, "max_schemas": 4,
-    "schema_max_tokens": 512, "schema_path": None, "schema_persist": False,
+    "schema_max_tokens": 2048, "schema_path": None, "schema_persist": False,
+    # REM dreaming (sleep/dreamer.py + sleep/insight_validator.py), REM mode only: the dreamer
+    # recombines memory items + steps into hypotheses; each stays a hypothesis until a paired
+    # A/B sandbox test confirms it (validated -> verified, refuted -> refuted, else tentative).
+    "dream": False,                  # off by default: every existing arm keeps its semantics
+    "dream_max": 3,                  # dream hypotheses per REM pass
+    "dream_k_sources": 6,            # memory items sampled per dream call (seeded, exploration mix)
+    "dream_k_failures": 2,           # refuted/dead_end items reserved per call — counterfactual substrate
+    "dream_max_tokens": 4096, "dream_retries": 1,
+    "dream_seed": None,              # None -> deterministic from the sleep step
+    "dream_min_strength": 0.0,       # memory items below this strength are not dream sources
+    "dream_validate": True, "dream_evals": 2,   # A/B tests per REM pass (<= 2 eval calls each)
+    "dream_margin": None,            # None -> replay_margin
+    "dream_min_budget_tokens": 8192, # skip dreaming when less than this much budget remains
+    # cross-run memory (MemoryStore.save_state/from_state): a JSON file the store loads from at
+    # construction and writes back after every consolidate, so discoveries persist across runs
+    # and problems. Shared files are last-write-wins: do not point parallel runs at one file.
+    "memory_path": None,
     # gating: fatigue (the loop's FatigueMonitor level) | pressure | fixed | schedule
     "gating": "fatigue",
     "sleep_steps": None,            # schedule gating: explicit steps after which to sleep
@@ -105,7 +145,9 @@ DEFAULTS: dict[str, Any] = {
 GATINGS = ("fatigue", "pressure", "fixed", "schedule")
 TIMED_DEPTHS = ("scheduler", "nrem", "fatigue")
 SUM_METRICS = ("items_added", "items_evicted", "replays_wasted", "replays_run", "claims", "edits_applied",
-               "edits_rejected")
+               "edits_rejected", "replay_evaluations", "replays_beat_run_best", "consolidator_calls",
+               "dream_calls", "dream_evaluations", "dreams_validated", "dreams_refuted",
+               "dreams_uncertain", "dreams_untested")
 
 METRIC_FIELDS = ("pressure", "sleep_mode", "block_tokens", "items_added", "items_evicted", "replays_wasted")
 
@@ -148,6 +190,17 @@ class FullSleep:
             max_chars=self.p["max_item_chars"], path=self.p["schema_path"], persist=self.p["schema_persist"],
         ) if self.p["schema"] else None
         self.evaluator = None
+        p = self.p
+        self.dreamer = Dreamer(k_sources=p["dream_k_sources"], max_dreams=p["dream_max"],
+                               dream_max_tokens=p["dream_max_tokens"], retries=p["dream_retries"],
+                               seed=p["dream_seed"] or 0, min_strength=p["dream_min_strength"],
+                               k_failures=p["dream_k_failures"])
+        if p["memory_path"]:
+            try:
+                self.store = MemoryStore.from_state(
+                    json.loads(Path(p["memory_path"]).read_text(encoding="utf-8")))
+            except FileNotFoundError:
+                pass  # first run sharing this path starts empty
         self.last_metrics: dict = {}
         self._last_sleep_step = -1
         self._seen: list[dict] = []  # slim copies of observed step records (for pressure)
@@ -380,10 +433,14 @@ class FullSleep:
             "policy": self.name, "sleep_mode": mode, "mode_reason": mode_reason,
             "pressure": P.combine(comp, p["pressure_weights"]), "pressure_components": comp,
             "history_steps": len(window), "claims": 0, "edits_applied": 0, "edits_rejected": 0,
-            "replays_run": 0, "replays_wasted": 0, "parse_error": None, "replays": [], "edits": [],
+            "replays_run": 0, "replays_wasted": 0, "replay_evaluations": 0, "replays_beat_run_best": 0,
+            "replay_margin": p["replay_margin"], "consolidator_calls": 0, "parse_error": None,
+            "replays": [], "edits": [], "goals": [], "merges": [],
         }
         claims: list[dict] = []
         replays: list[dict] = []
+        goals: list[dict] = []
+        merges: list[dict] = []
         if window:
             user = CONSOLIDATOR_USER.substitute(
                 task=task, n_items=len(self.store), memory_items_json=json.dumps(self.store.to_json_list(), indent=0),
@@ -392,12 +449,23 @@ class FullSleep:
                 stall=f"{comp['stall']:.2f}", persev=f"{comp['perseveration']:.2f}", surprise=f"{comp['surprise']:.2f}",
                 mode_note=REM_NOTE if mode == "rem" else NREM_NOTE, k_steps=k_steps,
                 replay_budget=replay_budget if p["replay"] else 0,
+                margin_note=f"{p['replay_margin']:.3g} x |control score|", max_goals=p["max_goals"],
             )
-            resp = llm.complete([{"role": "system", "content": CONSOLIDATOR_SYSTEM}, {"role": "user", "content": user}],
-                                role="sleep", max_tokens=p["consolidator_max_tokens"])
-            obj, err = parse_json_object(resp.text)
+            messages = [{"role": "system", "content": CONSOLIDATOR_SYSTEM}, {"role": "user", "content": user}]
+            obj, err = None, None
+            for attempt in range(1 + max(0, int(p["consolidator_retries"]))):
+                resp = llm.complete(messages, role="sleep", max_tokens=p["consolidator_max_tokens"])
+                m["consolidator_calls"] += 1
+                obj, err = parse_json_object(resp.text)
+                if obj is not None:
+                    break
+                messages = messages[:2] + [{"role": "assistant", "content": resp.text[:2000]},
+                                           {"role": "user", "content": RETRY_NOTE}]
             claims, replays, problems = validate_consolidation(obj, max_claims=p["max_claims"],
                                                                max_chars=p["max_item_chars"])
+            goals, merges, g_problems = validate_goals_and_merges(obj, max_goals=p["max_goals"],
+                                                                  max_chars=p["max_item_chars"])
+            problems += g_problems
             m["parse_error"] = err or ("; ".join(problems) if problems else None)
             if isinstance(obj, dict) and isinstance(obj.get("selected_steps"), list):
                 m["selected_steps"] = obj["selected_steps"][:k_steps]
@@ -406,26 +474,51 @@ class FullSleep:
 
         decided: set = set()
         applied: list[Edit] = []
+        n_rejected = 0
         if p["replay"] and replays:
             rep = run_replays(replays, by_cid, self.store, self.evaluator, step=step, max_replays=replay_budget,
-                              step_scores=step_scores, run_best=run_best, rel_tol=p["replay_rel_tol"])
+                              margin=p["replay_margin"], rel_tol=p["replay_rel_tol"], run_best=run_best)
             decided, applied = rep.decided_cids, list(rep.edits_applied)
-            m.update(replays=rep.records, replays_run=len(rep.records), replays_wasted=rep.wasted)
+            m.update(replays=rep.records, replays_run=len(rep.records), replays_wasted=rep.wasted,
+                     replay_evaluations=rep.evaluations, replays_beat_run_best=rep.beats_run_best)
 
         tentative = self._tentative_edits([c for c in claims if c["cid"] not in decided])
         ok, rejected = self.store.apply_edits(tentative, step)
         applied += ok
+        n_rejected += len(rejected)
+
+        if p["merges"] and merges:
+            merge_edits = [Edit("merge", target=mg["ids"][0], item={"merge": mg["ids"][1:], "text": mg["text"]},
+                                source="claim") for mg in merges]
+            ok, rejected = self.store.apply_edits(merge_edits, step)
+            applied += ok
+            n_rejected += len(rejected)
+            why = {id(e): r for e, r in rejected}
+            m["merges"] = [{"ids": mg["ids"], "applied": id(e) not in why, "reason": why.get(id(e))}
+                           for mg, e in zip(merges, merge_edits)]
+
+        goal_ids: set = set()
+        for g in goals:
+            gid, action = self.store.set_goal(g["text"], step, replaces=g["replaces"],
+                                              max_goals=p["max_goals"], keep=goal_ids)
+            if gid:
+                goal_ids.add(gid)
+            m["goals"].append({"id": gid, "text": g["text"], "replaces": g["replaces"], "action": action})
+
         m["edits_applied"] = len(applied)
-        m["edits_rejected"] = len(rejected)
+        m["edits_rejected"] = n_rejected
         m["edits"] = [e.to_dict() for e in applied]
 
-        touched = {e.target for e in applied if e.target} | {"g0"}
+        touched = {e.target for e in applied if e.target} | {"g0"} | goal_ids
         if p["decay"]:
             self.store.decay(step, p["decay_factor"], exempt=touched)
         evicted = self.store.evict(min_strength=p["min_strength"], max_items=p["max_items"]) if p["eviction"] else []
         if self.schemas is not None and mode == "rem":
             m.update(self.schemas.update(task, self.store, llm, step=step))
+        if p["dream"] and mode == "rem":
+            m.update(self._dream(task, records, llm, budget, step=step))
 
+        self._persist_memory()
         self._last_sleep_step = step
         m["items_added"] = len(set(self.store.items) - before) + sum(1 for i in evicted if i not in before)
         m["items_evicted"] = len(evicted)
@@ -434,6 +527,48 @@ class FullSleep:
         m["block_tokens"] = count_tokens(self.memory_section(self.max_block_tokens))
         self.last_metrics = m
         return m
+
+    def _dream(self, task: str, records: list[dict], llm, budget, *, step: int) -> dict:
+        """The REM dream pass: recombine memory into hypotheses, then validate them in the sandbox.
+
+        Budget-aware (adaptive sleeping): below `dream_min_budget_tokens` remaining the pass is
+        skipped entirely; `dream_evals` caps sandbox tests so dreams can never eat the run's
+        evaluation budget unchecked (they share the run's EvalBudget through the bound evaluator).
+        """
+        p = self.p
+        remaining = getattr(budget, "remaining", None)
+        if remaining is not None and remaining < p["dream_min_budget_tokens"]:
+            return {"dream_skipped": "low_budget", "dream_remaining_tokens": remaining,
+                    "dream_calls": 0, "dream_evaluations": 0}
+        dm = self.dreamer.dream(task, self.store, records, llm, step=step)
+        m: dict = {"dream_calls": dm.get("dream_calls", 0),
+                   "dream_parse_error": dm.get("dream_parse_error"),
+                   "dream_source_ids": dm.get("dream_source_ids"), "dream_evaluations": 0}
+        dreams = dm.get("dreams") or []
+        if not dreams:
+            m["dreams"] = []
+            return m
+        # dream_validate=False still writes records: every dream lands as an untested, tentative item
+        rep = run_dream_tests(dreams, self.store, self.evaluator, step=step,
+                              max_tests=p["dream_evals"] if p["dream_validate"] else 0,
+                              margin=p["dream_margin"] if p["dream_margin"] is not None else p["replay_margin"],
+                              rel_tol=p["replay_rel_tol"])
+        m["dreams"] = rep["records"]
+        m["dream_evaluations"] = rep["evaluations"]
+        for k in ("validated", "refuted", "uncertain", "untested"):
+            m[f"dreams_{k}"] = rep[k]
+        return m
+
+    def _persist_memory(self) -> None:
+        """Write the store to `memory_path` (cross-run memory; see DEFAULTS)."""
+        path = self.p["memory_path"]
+        if not path:
+            return
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(self.store.save_state()), encoding="utf-8")
+        os.replace(tmp, path)
 
     def _refresh_goal(self, best_rec: dict | None, step: int) -> None:
         if best_rec:

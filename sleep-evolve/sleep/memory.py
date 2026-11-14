@@ -5,7 +5,12 @@ edits/decays/evictions always yields the same store, ids and rendering.
 
 Kinds:   goal | rule | fact | skill | dead_end
 Status:  tentative | verified | contested | refuted
-Goals are never decayed or evicted and always render first.
+Goals are never decayed or evicted and always render first. g0 is the code-maintained best-score
+line; consolidator goals get ids g1, g2, ... (set_goal: at most `max_goals` of them; when full, the
+oldest goal not touched this sleep is replaced). remove never removes a goal; merge never mixes a
+goal with a non-goal and never touches g0.
+
+Status ranking (merge keeps the highest): verified > tentative > contested > refuted (STATUS_WEIGHT).
 """
 
 from __future__ import annotations
@@ -19,7 +24,8 @@ from harness.context import fit_lines
 KINDS = ("goal", "rule", "fact", "skill", "dead_end")
 STATUSES = ("tentative", "verified", "contested", "refuted")
 STATUS_WEIGHT = {"verified": 1.0, "tentative": 0.6, "contested": 0.35, "refuted": 0.2}
-EDIT_OPS = ("add", "support", "contradict", "refute")
+EDIT_OPS = ("add", "support", "contradict", "refute", "merge", "remove")
+PROTECTED_GOALS = ("g0",)  # maintained by code; never replaced or merged by the consolidator
 MAX_EVIDENCE = 8
 MAX_TAGS = 8
 
@@ -64,13 +70,16 @@ class MemoryItem:
 
 @dataclass
 class Edit:
-    """One memory edit. op: add | support | contradict | refute.
+    """One memory edit. op: add | support | contradict | refute | merge | remove.
 
     add:        `item` holds the new item's fields (kind, text, status, strength, ...).
     support:    strengthen `target`; status may be promoted (e.g. to verified).
     contradict: weaken `target`; a verified item becomes contested.
     refute:     mark `target` refuted. With no target and an `item`, the claim is added
                 with status refuted (a tested-and-false claim the agent should not retry).
+    merge:      combine `target` with the ids in item["merge"] into `target` (optional new
+                item["text"]); see MemoryStore.merge. The other items are removed.
+    remove:     delete `target`. Never removes a goal.
     """
 
     op: str
@@ -106,6 +115,7 @@ class MemoryStore:
         self.contradict_loss = contradict_loss
         self.max_item_chars = max_item_chars
         self._next = 1
+        self._next_goal = 1
 
     # ---- basic access -------------------------------------------------------------
     def __len__(self) -> int:
@@ -178,6 +188,108 @@ class MemoryStore:
         it.evidence = _dedupe(list(it.evidence) + list(evidence))[-MAX_EVIDENCE:]
         return True
 
+    def remove(self, item_id: str) -> str | None:
+        """Delete a non-goal item. Returns None on success, else the rejection reason."""
+        it = self.items.get(item_id)
+        if it is None:
+            return f"unknown target {item_id!r}"
+        if it.kind == "goal":
+            return f"cannot remove goal {item_id}"
+        del self.items[item_id]
+        return None
+
+    def merge(self, target: str, others: Iterable[str] | str, step: int, text: str | None = None) -> str | None:
+        """Merge `others` into `target`. Returns None on success, else the rejection reason.
+
+        The kept item (id and kind of `target`) gets: `text` if given (else target's text); the
+        union of evidence (order kept, capped at MAX_EVIDENCE, newest kept) and of tags (capped
+        at MAX_TAGS); the highest status by STATUS_WEIGHT; the max strength; the min created_step
+        and the max last_supported_step. The other items are deleted.
+        Rejected: fewer than two distinct ids, unknown ids, a goal mixed with a non-goal, g0, a
+        dead_end mixed with a non-dead_end (opposite polarity), or merged text equal to the text
+        of an item outside the merge.
+        """
+        if isinstance(others, str):
+            others = [others]
+        ids = _dedupe([str(target), *[str(o) for o in (others or [])]])
+        if len(ids) < 2:
+            return "merge needs at least two distinct items"
+        missing = [i for i in ids if i not in self.items]
+        if missing:
+            return f"unknown merge ids {missing}"
+        its = [self.items[i] for i in ids]
+        is_goal = [it.kind == "goal" for it in its]
+        if any(is_goal) and not all(is_goal):
+            return "cannot merge a goal with a non-goal"
+        if any(i in PROTECTED_GOALS for i in ids):
+            return "cannot merge the best-score goal g0"
+        is_dead = [it.kind == "dead_end" for it in its]
+        if any(is_dead) and not all(is_dead):
+            return "cannot merge a dead_end with a non-dead_end"
+        keep = its[0]
+        new_text = " ".join(str(text).split())[: self.max_item_chars] if text and str(text).strip() else keep.text
+        dup = self.find_text(new_text)
+        if dup is not None and dup.id not in ids:
+            return f"merged text duplicates {dup.id}"
+        keep.text = new_text
+        keep.status = max((it.status for it in its), key=lambda st: STATUS_WEIGHT.get(st, 0.0))
+        keep.strength = _clip(max(it.strength for it in its))
+        keep.evidence = _dedupe(e for it in its for e in it.evidence)[-MAX_EVIDENCE:]
+        keep.approach_tags = normalize_tags([t for it in its for t in it.approach_tags])
+        keep.created_step = min(it.created_step for it in its)
+        keep.last_supported_step = max(it.last_supported_step for it in its)
+        for it in its[1:]:
+            del self.items[it.id]
+        return None
+
+    # ---- goals ----------------------------------------------------------------------
+    def goals(self, *, include_protected: bool = False) -> list[MemoryItem]:
+        return sorted((i for i in self.items.values() if i.kind == "goal"
+                       and (include_protected or i.id not in PROTECTED_GOALS)), key=lambda i: _id_key(i.id))
+
+    def set_goal(self, text: str, step: int, *, replaces: str | None = None, max_goals: int = 3,
+                 keep: Iterable[str] = ()) -> tuple[str | None, str]:
+        """Add or replace one consolidator goal. Returns (goal id or None, action).
+
+        action: "refreshed" (same text as an existing goal), "replaced gN" (in place, id kept),
+        "added", "added, evicted gN" (cap reached: the oldest goal not in `keep` goes), or
+        "rejected: ...". A `replaces` that is unknown, not a goal, or g0 is ignored (noted in the
+        action) and the goal is added instead.
+        """
+        text = " ".join(str(text or "").split())[: self.max_item_chars]
+        if not text:
+            return None, "rejected: empty text"
+        key = _norm_text(text)
+        same = next((g for g in self.goals(include_protected=True) if _norm_text(g.text) == key), None)
+        if same is not None:
+            same.last_supported_step = max(same.last_supported_step, step)
+            return same.id, "refreshed"
+        note = ""
+        if replaces:
+            old = self.items.get(str(replaces))
+            if old is not None and old.kind == "goal" and old.id not in PROTECTED_GOALS:
+                old.text, old.last_supported_step = text, step
+                return old.id, f"replaced {old.id}"
+            note = f" (ignored replaces={replaces!r})"
+        if max_goals <= 0:
+            return None, "rejected: max_goals is 0" + note
+        keep = set(keep)
+        current = self.goals()
+        evicted = None
+        if len(current) >= max_goals:
+            pool = sorted((g for g in current if g.id not in keep),
+                          key=lambda g: (g.last_supported_step, g.created_step, _id_key(g.id)))
+            if not pool:
+                return None, "rejected: goal cap reached" + note
+            evicted = pool[0].id
+            del self.items[evicted]
+        while f"g{self._next_goal}" in self.items:
+            self._next_goal += 1
+        gid = f"g{self._next_goal}"
+        self._next_goal += 1
+        self.add(kind="goal", text=text, step=step, status="tentative", strength=1.0, item_id=gid)
+        return gid, "added" + (f", evicted {evicted}" if evicted else "") + note
+
     def decay(self, step: int, factor: float, *, exempt: Iterable[str] = ()) -> int:
         """Multiply every non-goal item's strength by `factor` (items in `exempt` skipped). Returns count."""
         skip = set(exempt)
@@ -246,6 +358,11 @@ class MemoryStore:
                 it.strength = _clip(self.initial_strength * 0.5)
             e.target = it.id
             return None
+        if e.op == "merge":
+            others = (e.item or {}).get("merge") or (e.item or {}).get("ids") or []
+            return self.merge(str(e.target), others, step, text=(e.item or {}).get("text"))
+        if e.op == "remove":
+            return self.remove(str(e.target))
         if e.target not in self.items:
             return f"unknown target {e.target!r}"
         ok = {
@@ -303,6 +420,40 @@ class MemoryStore:
              "evidence": list(i.evidence)[-max_evidence:], "approach_tags": i.approach_tags}
             for i in self.ordered()
         ]
+
+    # ---- cross-run persistence ------------------------------------------------------
+    def save_state(self) -> dict:
+        """Full store state as JSON-able data: every item plus the id counters, so a later run
+        (or a different problem) resumes with the same ids it would have issued next."""
+        return {
+            "items": [it.to_dict() for it in self.ordered()],
+            "_next": self._next, "_next_goal": self._next_goal,
+            "initial_strength": self.initial_strength, "verified_strength": self.verified_strength,
+            "support_gain": self.support_gain, "contradict_loss": self.contradict_loss,
+            "max_item_chars": self.max_item_chars,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "MemoryStore":
+        """Rebuild a store from save_state(). Missing files should be handled by the caller (start
+        an empty store); a corrupt dict raises."""
+        store = cls(
+            initial_strength=state.get("initial_strength", 0.3),
+            verified_strength=state.get("verified_strength", 0.7),
+            support_gain=state.get("support_gain", 0.15),
+            contradict_loss=state.get("contradict_loss", 0.25),
+            max_item_chars=state.get("max_item_chars", 300),
+        )
+        for d in state.get("items") or []:
+            it = MemoryItem(**{k: d[k] for k in MemoryItem.__dataclass_fields__ if k in d})
+            store.items[it.id] = it
+        if "_next" in state:
+            store._next = int(state["_next"])
+        else:  # defensive: derive from the highest m-id + 1
+            store._next = 1 + max((_id_key(i)[1] for i in store.items if i.startswith("m")), default=0)
+        if "_next_goal" in state:
+            store._next_goal = int(state["_next_goal"])
+        return store
 
 
 def _clip(x: float) -> float:

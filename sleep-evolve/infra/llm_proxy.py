@@ -14,6 +14,14 @@ can talk to an OpenAI-compatible URL. This proxy is that URL. It forwards (stdli
      code "missing_usage"); tokens are never estimated. If the charge pushes the run over
      its total, the tokens stay recorded and the response is withheld.
 
+Request parameters: the proxy applies the run's resolved llm/chat_params.py ChatParams to every
+forwarded body (the same resolution LLMClient uses: max_completion_tokens for reasoning models,
+reasoning_effort, temperature / top_p / logprobs stripped where the model rejects them), and records
+the usage breakdown (cached prompt tokens, reasoning tokens) with each charge.
+
+Billing / quota refusals from the upstream (e.g. HTTP 429 insufficient_quota) are passed through
+unchanged; `ProxyLM` raises BillingError for them without retrying.
+
 Refusals use HTTP 402 with an OpenAI-style body
 `{"error": {"code": "budget_exhausted", "type": "budget_exhausted", ...}}`. `ProxyLM` (the
 client half, used by arms/) turns that into `BudgetExhausted`.
@@ -40,6 +48,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from harness.budget import Budget, BudgetExhausted
+from llm.chat_params import BillingError, ChatParams, billing_error_from_body, parse_usage, resolve_chat_params
 
 RUN_ID_HEADER = "X-Run-Id"
 ROLE_HEADER = "X-Budget-Role"
@@ -99,10 +108,12 @@ class LLMProxy:
         port: int = 0,
         default_max_tokens: int = 4096,
         request_timeout_s: float = 600.0,
+        chat_params: ChatParams | None = None,
     ):
         self.upstream_base_url = upstream_base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.chat_params = chat_params or resolve_chat_params(model, env={}, warn=False)
         self.default_max_tokens = default_max_tokens
         self._runs: dict[str, _Run] = {}
         self._runs_lock = threading.Lock()
@@ -112,11 +123,14 @@ class LLMProxy:
         self._thread: threading.Thread | None = None
 
     @classmethod
-    def from_env(cls, **kwargs: Any) -> "LLMProxy":
+    def from_env(cls, settings: Any = None, **kwargs: Any) -> "LLMProxy":
+        """Proxy to LLM_BASE_URL / LLM_MODEL; `settings` = RunConfig.llm (or None: env, then auto)."""
         missing = [k for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(k)]
         if missing:
             raise RuntimeError(f"missing env vars: {', '.join(missing)} (see .env.example)")
-        return cls(os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"], os.environ["LLM_MODEL"], **kwargs)
+        model = os.environ["LLM_MODEL"]
+        kwargs.setdefault("chat_params", resolve_chat_params(model, settings))
+        return cls(os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"], model, **kwargs)
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -191,11 +205,15 @@ class LLMProxy:
         budget = run.budget
         with run.lock:  # one in-flight call per run -> overshoot stays at most one call
             try:
-                key = "max_completion_tokens" if "max_completion_tokens" in body else "max_tokens"
-                requested = body.get(key) or self.default_max_tokens
-                body[key] = budget.clamp_completion(int(requested))
+                requested = body.get("max_completion_tokens") or body.get("max_tokens") or self.default_max_tokens
+                key = self.chat_params.token_key_for(body)
+                clamped = budget.clamp_completion(int(requested))
             except BudgetExhausted as e:
                 return _err(402, BUDGET_EXHAUSTED, str(e), budget=budget.snapshot())
+            self.chat_params.apply_to_body(body)
+            body.pop("max_tokens", None)
+            body.pop("max_completion_tokens", None)
+            body[key] = clamped
             if self.model:
                 body["model"] = self.model
             headers_out: dict[str, str] = {}
@@ -213,13 +231,15 @@ class LLMProxy:
                 return status, data
             if not isinstance(data, dict):
                 return _err(502, "bad_upstream_body", "upstream returned non-JSON")
-            usage = data.get("usage") or {}
-            pt, ct = usage.get("prompt_tokens"), usage.get("completion_tokens")
-            if pt is None or ct is None:
+            usage = parse_usage(data.get("usage"))
+            if usage is None:
                 return _err(502, "missing_usage", "upstream returned no usage field; cannot charge budget")
-            run.calls.append({"role": role, "prompt_tokens": int(pt), "completion_tokens": int(ct)})
+            run.calls.append({"role": role, "prompt_tokens": usage.prompt_tokens,
+                              "completion_tokens": usage.completion_tokens, "cached_tokens": usage.cached_tokens,
+                              "reasoning_tokens": usage.reasoning_tokens})
             try:
-                budget.charge(role, int(pt), int(ct))
+                budget.charge(role, usage.prompt_tokens, usage.completion_tokens,
+                              cached_tokens=usage.cached_tokens, reasoning_tokens=usage.reasoning_tokens)
             except BudgetExhausted as e:
                 return _err(402, BUDGET_EXHAUSTED, str(e), budget=budget.snapshot(), discarded=True)
             return 200, data
@@ -281,6 +301,7 @@ class ProxyLM:
 
     A 402 `budget_exhausted` refusal raises `BudgetExhausted` and sets `self.exhausted`
     (gepa swallows exceptions raised during reflection, so callers should also poll the flag).
+    A billing / quota refusal raises `BillingError` (never retried) and sets `self.billing_error`.
     429 / 5xx / connection errors are retried with exponential backoff.
     """
 
@@ -313,8 +334,11 @@ class ProxyLM:
         self.total_tokens_out = 0
         self.calls = 0
         self.exhausted = False
+        self.billing_error: BillingError | None = None
 
     def __call__(self, prompt: str | list[dict[str, Any]]) -> str:
+        if self.billing_error is not None:
+            raise self.billing_error
         if self.exhausted:
             raise BudgetExhausted("budget exhausted (proxy refused an earlier call)")
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else list(prompt)
@@ -337,6 +361,10 @@ class ProxyLM:
             if code == BUDGET_EXHAUSTED:
                 self.exhausted = True
                 raise BudgetExhausted(err.get("message", BUDGET_EXHAUSTED))
+            billing = billing_error_from_body(status, payload)
+            if billing is not None:  # quota / spend limit: retrying cannot help
+                self.billing_error = billing
+                raise billing
             retryable = status == -1 or status == 429 or status >= 500
             if retryable and code != "missing_usage" and attempt < self.max_retries:
                 delay = min(self.backoff_max_s, self.backoff_base_s * 2**attempt)

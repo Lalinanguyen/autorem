@@ -234,6 +234,9 @@ def compute_run_metrics(history: list[dict], *, best_known: float, total_budget:
     final = curve[-1][2] if curve else None
     memory = {k: sum(int(h.get(k) or 0) for h in sleeps) for k in ("items_added", "items_evicted", "replays_wasted")}
     memory["replays_run"] = sum(int((h.get("details") or {}).get("replays_run") or 0) for h in sleeps)
+    for k in ("dream_calls", "dream_evaluations", "dreams_validated", "dreams_refuted",
+              "dreams_uncertain", "dreams_untested"):
+        memory[k] = sum(int((h.get("details") or {}).get(k) or 0) for h in sleeps)
 
     return {
         "schema": METRICS_SCHEMA,

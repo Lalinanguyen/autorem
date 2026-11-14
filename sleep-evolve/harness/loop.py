@@ -26,6 +26,14 @@ happened (on_sleep / on_deferred), and only then is the step line written, so it
 the observed fatigue plus sleep_triggered / sleep_deferred / sleep_depth. Line order in the
 JSONL is unchanged (step line, then its sleep line).
 
+Every line carries the LLM usage since the previous line (harness/logging.py USAGE_FIELDS).
+summary.json also carries `usage` (Budget.usage_breakdown(): per role and total, with cached and
+reasoning tokens), `llm_params` (the resolved request parameters, llm/chat_params.py) and `cost`
+(harness/cost.py: dollars from the logged usage and the config's price table).
+
+A BillingError (quota / spend limit, never retried) ends the run with stop_reason "billing_error":
+outputs are written, then the error is re-raised so a matrix stops instead of launching more runs.
+
 summary.json carries `metrics` (harness/metrics.py: normalized score at budget checkpoints, budget to
 reach 95%/99%, sleep counts and tokens, behavior before/after sleeps, fatigue curve, memory
 diagnostics) and `arm` (RunConfig.baseline_arm, else the policy name).
@@ -46,10 +54,13 @@ from evaluators.base import INVALID_SCORE, EvalResult, Evaluator, invalid, norma
 from harness.budget import BudgetExhausted
 from harness.config import RunConfig
 from harness.context import build_context, count_tokens
+from harness.evals import CountingEvaluator, EvalBudget, EvalExhausted
+from harness.cost import cost_block, price_table
 from harness.fatigue import FatigueMonitor, SleepDepth
-from harness.logging import RunLogger
+from harness.logging import RunLogger, UsageCursor
 from harness.metrics import compute_run_metrics
 from harness.program_db import Program, ProgramDB
+from llm.chat_params import BillingError
 from llm.client import LLMClient
 from sleep.base import SleepPolicy, step_events
 from sleep.memory import normalize_tags
@@ -129,6 +140,8 @@ def agent_context(task: str, block: str, recent: list[dict], parent: Program, *,
 def _safe_evaluate(evaluator: Evaluator, code: str) -> EvalResult:
     try:
         return evaluator.evaluate(code)
+    except EvalExhausted:
+        raise  # the shared eval cap stops the run; it is not a program failure
     except Exception as e:  # evaluators should not raise, but the loop must never crash on one
         return invalid(f"evaluator raised {type(e).__name__}: {e}")
 
@@ -141,10 +154,14 @@ def run(
     out_dir: str | Path | None = None,
 ) -> dict:
     budget = llm.budget
+    evals = EvalBudget(cfg.max_evaluations)
+    evaluator = CountingEvaluator(evaluator, evals)
     run_id = cfg.resolved_run_id()
     out = Path(out_dir or cfg.out_dir) / run_id
     out.mkdir(parents=True, exist_ok=True)
     logger = RunLogger(out / "history.jsonl", run_id)
+    usage_cursor = UsageCursor(budget)
+    billing_error: BillingError | None = None
     rng = random.Random(cfg.seed)
     db = ProgramDB()
     history: list[dict] = []  # in-memory mirror of history.jsonl; only sleep policies see all of it
@@ -160,7 +177,7 @@ def run(
     context_cap = min(caps) if caps else None
     observe = getattr(policy, "observe", None)
     if callable(getattr(policy, "bind", None)):
-        policy.bind(evaluator=evaluator)
+        policy.bind(evaluator=evaluator.tagged("sleep"))  # replay evals count separately
     side_infos: dict[str, dict] = {}  # program id -> side_info, shown for the sampled parent
     monitor = FatigueMonitor(cfg.fatigue, best_known=evaluator.best_known, total_budget=budget.total_tokens)
     set_fatigue = getattr(policy, "set_fatigue", None) if cfg.fatigue.enabled else None
@@ -190,7 +207,8 @@ def run(
             fields["perseveration_hit"] = obs.get("perseveration_hit")
             if obs.get("perseveration_items"):
                 fields["details"]["perseveration_items"] = obs["perseveration_items"]
-        rec = logger.build(agent_tokens=budget.agent_tokens, sleep_tokens=budget.sleep_tokens, **fields)
+        rec = logger.build(agent_tokens=budget.agent_tokens, sleep_tokens=budget.sleep_tokens, **fields,
+                           **usage_cursor.take())
         monitor.observe(rec)
         rec.update(monitor.log_fields())
         history.append(rec)
@@ -221,9 +239,17 @@ def run(
         except BudgetExhausted:
             stop_reason = "budget_exhausted"
             break
+        except BillingError as e:
+            stop_reason, billing_error = "billing_error", e
+            break
         code = extract_program(resp.text)
         awake = parse_awake_header(resp.text) if awake_tags else None
-        result = _safe_evaluate(evaluator, code) if code else invalid("no ```python code block in response")
+        try:
+            result = _safe_evaluate(evaluator, code) if code else invalid(
+                "no ```python code block in response")
+        except EvalExhausted:
+            stop_reason = "eval_limit"
+            break
         rec = record(step, Program(f"p{step}", code or "", result.score if result.valid else INVALID_SCORE,
                                    result.valid, parent.id, step), result, awake, ctx["tokens"])
         steps_done = step
@@ -247,6 +273,14 @@ def run(
                 commit_step(rec)
                 stop_reason = "budget_exhausted"
                 break
+            except BillingError as e:
+                commit_step(rec)
+                stop_reason, billing_error = "billing_error", e
+                break
+            except EvalExhausted:
+                commit_step(rec)
+                stop_reason = "eval_limit"
+                break
             depth = getattr(policy, "last_depth", None)
             monitor.on_sleep(default_depth if depth is None else depth)
             commit_step(rec)
@@ -260,6 +294,7 @@ def run(
                     step=step, agent_tokens=budget.agent_tokens, sleep_tokens=budget.sleep_tokens,
                     event="sleep", details={"policy": policy.name, "block": block, **metrics},
                     block_tokens=count_tokens(block), **top, **monitor.log_fields(monitor.current()),
+                    **usage_cursor.take(),
                 )
             )
         if budget.exhausted:
@@ -284,6 +319,7 @@ def run(
         "best_normalized": normalized_score(best.score, evaluator.best_known) if best else None,
         "best_step": best.step if best else None,
         "budget": budget.snapshot(),
+        "evaluations": evals.snapshot(),
         "fatigue": {
             "enabled": cfg.fatigue.enabled,
             "sleeps": {d.label: sum(1 for _, x in monitor.sleeps if x == d)
@@ -295,8 +331,10 @@ def run(
         "llm_model": env_model,
         "config_model": cfg.model,
         "wallclock_s": round(time.monotonic() - t0, 3),
+        "error": str(billing_error) if billing_error is not None else None,
         "config": cfg.model_dump(),
     }
+    summary.update(usage_summary(llm, budget, cfg))
     try:  # summary metrics (harness/metrics.py); a bug there must not lose the run's outputs
         summary["metrics"] = compute_run_metrics(
             history, best_known=evaluator.best_known, total_budget=budget.total_tokens, budget=budget.snapshot(),
@@ -305,4 +343,18 @@ def run(
     except Exception as e:  # pragma: no cover - defensive
         summary["metrics"] = {"error": f"{type(e).__name__}: {e}"}
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if billing_error is not None:
+        raise billing_error
     return summary
+
+
+def usage_summary(llm: object, budget: object, cfg: RunConfig) -> dict:
+    """summary.json `usage`, `llm_params` and `cost` (shared with the GEPA arms).
+
+    The priced model is the one actually called (the transport's model, i.e. LLM_MODEL), else the
+    config's `model` (mock runs)."""
+    params = getattr(llm, "chat_params", None)
+    model = getattr(llm, "model", None) or cfg.model
+    usage = budget.usage_breakdown()
+    return {"usage": usage, "llm_params": params.to_dict() if params is not None else None,
+            "cost": cost_block(usage, model, price_table(cfg.prices))}

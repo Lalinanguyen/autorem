@@ -19,6 +19,11 @@ Per contrast and outcome: median paired difference with a seeded bootstrap 95% C
 Wilcoxon signed-rank p (analysis/baseline_stats.py: exact for <= 20 non-zero pairs, else normal
 approximation), and win/tie/loss counts from the first arm's point of view.
 
+Cost: per arm, the total and mean dollar cost of its runs from summary.json["cost"]["total"]
+(harness/cost.py, computed from the logged usage and the config's price table); runs without a known
+cost (mock configs, older logs, unpriced models) are counted in `cost_unknown_runs` and left out of
+the sums, so a total over a partly unknown arm is marked with "+" in the report.
+
 Figures (matplotlib, optional `analysis` group, imported lazily):
   a  score_vs_budget.png        best normalized score vs budget used: median + IQR band per arm, per problem
   b  fatigue_curves.png         fatigue over steps, no_sleep vs fatigue, sleep events marked
@@ -204,6 +209,21 @@ def _nanmean(xs) -> float | None:
     return float(np.mean(v)) if v else None
 
 
+def run_cost(br: BaselineRun) -> float | None:
+    """Dollar cost of a run (summary.json["cost"]["total"]); None if unknown."""
+    c = ((br.run.summary or {}).get("cost") or {}).get("total")
+    return float(c) if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) else None
+
+
+def run_evals(br: BaselineRun) -> tuple[float | None, float | None, float | None]:
+    """(used, agent_evals, sleep_evals) from summary.json["evaluations"]; None when unrecorded."""
+    e = (br.run.summary or {}).get("evaluations") or {}
+    def num(k):
+        v = e.get(k)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return num("used"), num("agent_evals"), num("sleep_evals")
+
+
 def arm_summaries(runs: list[BaselineRun]) -> dict[str, dict]:
     out = {}
     for arm in _arms_present(runs):
@@ -226,8 +246,28 @@ def arm_summaries(runs: list[BaselineRun]) -> dict[str, dict]:
             "items_added_mean": _nanmean([m.get("items_added") for m in mem]),
             "items_evicted_mean": _nanmean([m.get("items_evicted") for m in mem]),
             "replays_wasted_mean": _nanmean([m.get("replays_wasted") for m in mem]),
+            "dreams_validated_mean": _nanmean([m.get("dreams_validated") for m in mem]),
+            "dreams_total_mean": _nanmean([
+                sum(m.get(k) or 0 for k in ("dreams_validated", "dreams_refuted",
+                                            "dreams_uncertain", "dreams_untested")) or None
+                for m in mem]),
+            "dream_hit_rate_mean": _nanmean([
+                (m["dreams_validated"] / (m["dreams_validated"] + m["dreams_refuted"]))
+                if (m.get("dreams_validated") or 0) + (m.get("dreams_refuted") or 0) else None
+                for m in mem]),
+            "evals_used_mean": _nanmean([run_evals(r)[0] for r in rs]),
+            "evals_agent_mean": _nanmean([run_evals(r)[1] for r in rs]),
+            "evals_sleep_mean": _nanmean([run_evals(r)[2] for r in rs]),
+            **_cost_fields([run_cost(r) for r in rs]),
         }
     return out
+
+
+def _cost_fields(costs: list[float | None]) -> dict:
+    known = [c for c in costs if c is not None]
+    return {"cost_total": round(sum(known), 6) if known else None,
+            "cost_mean": round(sum(known) / len(known), 6) if known else None,
+            "cost_unknown_runs": len(costs) - len(known)}
 
 
 def behavior_around_sleep(runs: list[BaselineRun]) -> dict[str, dict]:
@@ -529,6 +569,7 @@ def compare(root: str | Path, *, n_boot: int = 10000, seed: int = 0, alpha: floa
         "runs": len(runs), "pairs": len(pairs), "arms": _arms_present(runs), "alpha": alpha,
         "n_boot": n_boot, "bootstrap_seed": seed,
         "arm_summaries": arm_summaries(runs),
+        "cost": _cost_fields([run_cost(r) for r in runs]),
         "behavior_around_sleep": behavior_around_sleep(runs),
         "contrasts": cs,
         "summary": summary_paragraph(cs, alpha),
@@ -543,7 +584,8 @@ def format_report(rep: dict) -> str:
              f"{', '.join(rep['arms'])}", ""]
     lines.append("Per arm (medians across runs; sleeps = LLM sleeps):")
     lines.append(f"  {'arm':16s} {'n':>3s} {'final':>7s} {'@25%':>7s} {'95%reach':>8s} {'b2_95':>6s} "
-                 f"{'sleeps':>6s} {'forget':>6s} {'sleep%':>6s} {'added':>6s} {'evict':>6s} {'wasted':>6s}")
+                 f"{'sleeps':>6s} {'forget':>6s} {'sleep%':>6s} {'added':>6s} {'evict':>6s} {'wasted':>6s} "
+                 f"{'evals':>6s} {'ev/slp':>6s} {'cost$':>9s}")
     f = (lambda x, nd=3: "-" if x is None else f"{x:.{nd}f}")
     for arm, s in rep["arm_summaries"].items():
         lines.append(f"  {arm:16s} {s['n_runs']:>3d} {f(s['final_score_median']):>7s} {f(s['score_at_25_median']):>7s} "
@@ -551,9 +593,13 @@ def format_report(rep: dict) -> str:
                      f"{f(s['llm_sleeps_mean'], 1):>6s} {f(s['forgets_mean'], 1):>6s} "
                      f"{f(None if s['sleep_share_of_budget_mean'] is None else 100 * s['sleep_share_of_budget_mean'], 1):>6s} "
                      f"{f(s['items_added_mean'], 1):>6s} {f(s['items_evicted_mean'], 1):>6s} "
-                     f"{f(s['replays_wasted_mean'], 1):>6s}")
+                     f"{f(s['replays_wasted_mean'], 1):>6s} {f(s['evals_used_mean'], 1):>6s} "
+                     f"{f(s['evals_sleep_mean'], 1):>6s} {_cost_txt(s):>9s}")
         if s["scheduled_vs_realized"]:
             lines.append(f"  {'':16s} scheduled vs realized sleeps per run: {s['scheduled_vs_realized']}")
+    if rep.get("cost"):
+        lines.append(f"  total cost of all runs: {_cost_txt(rep['cost'])} (USD, from logged usage; "
+                     "'+' = some runs have no known cost)")
     lines += ["", "Behavior before -> after LLM sleeps (mean rates; * = placebo at the paired fatigue run's sleep steps):"]
     for arm, b in rep["behavior_around_sleep"].items():
         star = "*" if "placebo" in b["reference"] else " "
@@ -576,6 +622,13 @@ def format_report(rep: dict) -> str:
     lines += [f"  - {x}" for x in rep["interpretation"]]
     lines += ["", rep["interpretation_guide"]]
     return "\n".join(lines)
+
+
+def _cost_txt(s: dict) -> str:
+    tot = s.get("cost_total")
+    if tot is None:
+        return "-"
+    return f"{tot:.4f}" + ("+" if s.get("cost_unknown_runs") else "")
 
 
 def main(argv: list[str] | None = None) -> int:

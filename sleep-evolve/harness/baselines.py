@@ -24,6 +24,13 @@ Arms (ARM_SPECS):
   sleep_lite      SleepLite (optional): drowsy-tier forgetting only, zero sleep LLM calls
   fixed_tiered    (variant, not in the default list) gating=fixed, every_n=5, timed_depth=fatigue
 Arms 2-5 run NREM only (timed_depth=nrem: no REM, no forget tier, scheduler not used for depth).
+  summarize       Summarize policy every_n=5: plain notes, no structured memory (dream-ladder arm 3)
+  dream_unvalidated  FullSleep gating=fatigue + REM dreaming; dream hypotheses enter memory as
+                  tentative items but are NEVER sandbox-tested (arm 4: does validation matter?)
+  dream           FullSleep gating=fatigue + REM dreaming + A/B dream validation (arm 5)
+  dream_distill   `dream` plus an optional memory_path: the store persists across runs/problems so
+                  validated discoveries accumulate for the offline distillation pipeline (arm 6;
+                  actual LoRA training happens outside runs via sleep/trainer.py + infra/modal_train.py)
 
 "Sleep count" for matching = LLM sleeps (depth nrem or nrem_rem) in the fatigue arm's log; its
 code-only forgets are not counted (they are reported separately in the metrics).
@@ -34,7 +41,10 @@ sleep_policies, plus `sleep.<param>` for the parameters the arm's policy receive
 shared sleep settings it carries unused) and diffed against the shared base. Any difference outside
 `sleep.<declared param>` (and problem_id / seed, which define the pair) fails, as does a wrong
 policy, `awake_tags` not true, or an effective context cap (min of context_cap_tokens and the
-policy's own cap) that differs between arms. Per-arm `overrides` / undeclared `arm_params` in the
+policy's own cap) that differs between arms. The LLM identity is also asserted explicitly: the config
+`model`, the `llm:` block, the resolved request parameters (llm/chat_params.py: token param,
+reasoning_effort, temperature, under the shared env), `prices` and `max_dollars` must be identical
+in every arm, so agent and sleep calls of every arm get the same model and settings. Per-arm `overrides` / undeclared `arm_params` in the
 suite YAML therefore fail the check.
 
 Run order (plan_suite): wave 1 = fatigue (auto-added when a matched arm needs it) and every
@@ -56,6 +66,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from harness.config import RunConfig
+from llm.chat_params import resolve_chat_params
 from harness.metrics import llm_sleep_steps, step_records
 
 SHARED_POLICY = "full_sleep"  # the sleep_policies entry holding the shared sleep settings
@@ -98,6 +109,17 @@ ARM_SPECS: dict[str, ArmSpec] = {s.name: s for s in (
           role="drowsy-tier forgetting only (zero sleep LLM calls)"),
     _spec("fixed_tiered", "full_sleep", {"gating": "fixed", "every_n": 5, "timed_depth": "fatigue"},
           role="variant: fixed timing, depth from fatigue level"),
+    # Dreaming arms (eval ladder arm 3-5; arm 6 = dream + persisted memory, distillation is offline)
+    _spec("summarize", "summarize", {"every_n": 5}, role="NREM-by-time summarization (plain notes arm)"),
+    _spec("dream_unvalidated", "full_sleep",
+          {"gating": "fatigue", "dream": True, "dream_validate": False},
+          role="NREM + REM associative dreaming; hypotheses land tentative, never sandbox-tested"),
+    _spec("dream", "full_sleep", {"gating": "fatigue", "dream": True, "dream_validate": True},
+          role="NREM + REM dreaming + A/B dream validation"),
+    _spec("dream_distill", "full_sleep",
+          {"gating": "fatigue", "dream": True, "dream_validate": True},
+          extra=("memory_path",), role="dream + validation; memory persists across "
+          "runs via memory_path so validated discoveries accumulate for offline distillation"),
 )}
 
 DEFAULT_ARMS = ("no_sleep", "fixed_letta", "fixed_sparse", "fixed_matched", "random_matched", "fatigue",
@@ -125,6 +147,8 @@ class BaselinesSection(BaseModel):
         default_factory=dict, description="per-arm RunConfig overrides; anything here fails the drift check "
                                           "unless it only touches declared params (testing hook)")
     matching: MatchingConfig = Field(default_factory=MatchingConfig)
+    problems: list[int] | None = Field(None, description="default problems for run_matrix (CLI --problems wins)")
+    seeds: list[int] | None = Field(None, description="default seeds for run_matrix (CLI --seeds wins)")
 
 
 @dataclass
@@ -234,12 +258,28 @@ def base_view(suite: Suite) -> dict[str, Any]:
 _MISSING = object()
 
 
+def llm_identity(cfg: RunConfig) -> dict:
+    """Model, LLM settings and resolved request parameters of a config (identical in every arm)."""
+    try:
+        params = resolve_chat_params(cfg.model, cfg.llm, warn=False).to_dict()
+    except ValueError as e:
+        params = {"error": str(e)}
+    return {"model": cfg.model, "llm": cfg.llm.model_dump(), "resolved": params,
+            "prices": {k: v.model_dump() for k, v in sorted(cfg.prices.items())}, "max_dollars": cfg.max_dollars}
+
+
 def drift_problems(suite: Suite, cfgs: Iterable[RunConfig]) -> list[str]:
     """Every violation of the one-difference rule among `cfgs` (empty list = OK)."""
     ref = base_view(suite)
+    ref_llm = llm_identity(suite.base)
     problems: list[str] = []
     caps: dict[Any, set] = {}
     for cfg in cfgs:
+        ident = llm_identity(cfg)
+        if ident != ref_llm:
+            diff = sorted(k for k in ident if ident[k] != ref_llm.get(k))
+            problems.append(f"{cfg.baseline_arm or cfg.resolved_run_id()}: LLM settings differ from the shared base "
+                            f"({', '.join(diff)}): {ident} vs {ref_llm}")
         arm = cfg.baseline_arm
         if arm not in ARM_SPECS:
             problems.append(f"{cfg.resolved_run_id()}: not a baseline arm ({arm!r})")

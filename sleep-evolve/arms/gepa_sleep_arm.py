@@ -31,12 +31,14 @@ import warnings
 from pathlib import Path
 from typing import Any, Callable
 
-from arms.gepa_arm import ARM_NAMES, GEPAArmConfig, open_session, write_outputs
+from arms.gepa_arm import ARM_NAMES, GEPAArmConfig, open_session, raise_if_billing, write_outputs
 from evaluators.base import Evaluator
 from harness.budget import Budget, BudgetExhausted
+from harness.evals import EvalExhausted
 from harness.fatigue import FATIGUE_FIELDS, SleepDepth
 from harness.logging import FIELDS
 from infra.llm_proxy import LLMProxy
+from llm.chat_params import BillingError
 
 # Keys RunLogger sets itself or that only step events carry; never taken from sleep metrics.
 _RESERVED = {
@@ -79,9 +81,9 @@ def run_gepa_sleep(
         warnings.warn(f"config model {cfg.model!r} != LLM_MODEL {env_model!r}; calls use LLM_MODEL")
 
     policy = sleep_factory(dict(cfg.sleep_policies.get(cfg.gepa.sleep_policy, {})))
-    if callable(getattr(policy, "bind", None)):
-        policy.bind(evaluator=evaluator)
     session = open_session(cfg, evaluator, budget, proxy, out, run_id)
+    if callable(getattr(policy, "bind", None)):
+        policy.bind(evaluator=session.evaluator.tagged("sleep"))  # replay evals count separately
     observe = getattr(policy, "observe", None)
     session.observe = observe if callable(observe) else None
 
@@ -98,7 +100,7 @@ def run_gepa_sleep(
             session.optimize(seed, background, new_evals=k)
             rounds += 1
             done = session.steps_done >= cfg.metric_calls
-            if done or session.error or session.budget_exhausted() or session.llm_failed():
+            if done or session.error or session.budget_exhausted() or session.llm_failed() or session.billing_failed():
                 break
             if session.next_step == before:
                 stalled = True  # gepa stopped on its internal limit without a new candidate
@@ -108,6 +110,11 @@ def run_gepa_sleep(
                 metrics = policy.consolidate(task, session.history, sleep_llm, budget, step=step) or {}
             except BudgetExhausted:
                 break
+            except BillingError as e:  # sleep call refused for billing: stop like the proxy path
+                session.lm.billing_error = e
+                break
+            except EvalExhausted:
+                break  # shared eval cap reached; stop_reason reports eval_limit
             memory = policy.memory_section(cfg.gepa.memory_token_cap)
             sleeps += 1
             if session.monitor is not None:
@@ -122,7 +129,9 @@ def run_gepa_sleep(
         proxy.unregister(run_id)
 
     extra = {"rounds": rounds, "sleeps": sleeps, "round_metric_calls": k, "stalled": stalled}
-    return write_outputs(session, arm=ARM_NAMES["gepa_sleep"], run_id=run_id, t0=t0, extra=extra)
+    summary = write_outputs(session, arm=ARM_NAMES["gepa_sleep"], run_id=run_id, t0=t0, extra=extra)
+    raise_if_billing(session)
+    return summary
 
 
 def _log_sleep(session: Any, policy: Any, metrics: dict, memory: str, *, step: int, round_: int) -> None:
@@ -139,5 +148,6 @@ def _log_sleep(session: Any, policy: Any, metrics: dict, memory: str, *, step: i
         session.logger.log(
             step=step, agent_tokens=session.budget.agent_tokens, sleep_tokens=session.budget.sleep_tokens,
             event="sleep", details=details, **top,
+            **(session.usage_cursor.take() if getattr(session, "usage_cursor", None) is not None else {}),
         )
     )
