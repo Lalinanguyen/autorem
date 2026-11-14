@@ -1,0 +1,13 @@
+# Local dry run: mock evaluator (problem 0) + mock LLM (use --mock-llm). No network, no keys.
+problem_id: 0
+seed: 0
+total_token_budget: 3000       # mock LLM charges 100 tokens per call -> 30 calls total
+max_steps: 100
+k_recent: 5
+sleep_policy: summarize
+sleep_policies:
+  summarize:
+    every_n: 5
+    max_block_tokens: 256
+eval_timeout_s: 10
+out_dir: runs

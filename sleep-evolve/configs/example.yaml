@@ -1,0 +1,29 @@
+# A real run: problem 36 against the endpoint in LLM_BASE_URL / LLM_API_KEY / LLM_MODEL.
+problem_id: 36
+seed: 0
+total_token_budget: 2000000   # agent + sleep tokens, one shared total
+max_steps: 500
+k_recent: 5                    # last K steps shown to the agent
+max_completion_tokens: 8192
+
+sleep_policy: summarize        # no_sleep | summarize | full_sleep (stub)
+sleep_policies:                # params per policy; only the selected entry is used
+  no_sleep: {}
+  summarize:
+    every_n: 10
+    max_block_tokens: 1024
+  full_sleep:
+    every_n: 10
+    max_block_tokens: 2048
+
+eval_backend: local            # local (subprocess) | modal (requires: modal deploy infra/modal_eval.py)
+eval_timeout_s: 60
+
+model: Qwen/Qwen3-8B           # expected LLM_MODEL; also what infra/modal_vllm.py serves
+serve:
+  model: Qwen/Qwen3-8B
+  gpu: "H100:1"
+  vllm_version: "0.32.0"
+  max_model_len: 32768
+
+out_dir: runs
