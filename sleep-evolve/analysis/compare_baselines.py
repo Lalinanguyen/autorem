@@ -55,7 +55,7 @@ from harness.metrics import around_steps, best_curve, compute_run_metrics, norma
 
 ALPHA = 0.05
 ARM_ORDER = ("no_sleep", "sleep_lite", "fixed_letta", "fixed_sparse", "fixed_matched", "random_matched",
-             "fatigue", "fixed_tiered")
+             "fatigue", "fixed_tiered", "summarize", "dream_unvalidated", "dream", "dream_distill")
 SLEEP_ARMS = ("fixed_letta", "fixed_sparse", "fixed_matched", "random_matched", "fatigue", "fixed_tiered")
 CONTRASTS = (
     ("Q1", "fatigue", "no_sleep"),
@@ -64,6 +64,12 @@ CONTRASTS = (
     ("Q2", "fatigue", "fixed_letta"),
     ("Q2", "fatigue", "fixed_matched"),
     ("Q2", "fixed_matched", "random_matched"),
+    # Dream ladder (configs/dream_openai.yaml): does REM dreaming + A/B validation beat NREM-only?
+    ("Q3", "dream", "fixed_letta"),
+    ("Q3", "dream", "no_sleep"),
+    ("Q3", "dream", "dream_unvalidated"),     # is the sandbox validation of dreams load-bearing?
+    ("Q3", "dream_unvalidated", "fixed_letta"),
+    ("Q3", "summarize", "no_sleep"),
 )
 OUTCOMES = {  # name -> (label, better)
     "budget_to_95": ("budget fraction to reach 95% of best_known", "lower"),
@@ -78,6 +84,9 @@ INTERPRETATION_GUIDE = """Interpretation guide
   - fatigue ~ fixed_matched, both > fixed_letta  -> the gain comes from sleeping less often, not from smart timing
   - fixed_matched ~ random_matched               -> fixed schedules carry no timing benefit
   - any sleep arm < no_sleep                     -> consolidation costs more budget than it returns at this run length
+  - dream > fixed_letta                          -> REM dreaming + A/B validation beats NREM-only (the central claim)
+  - dream ~ dream_unvalidated                    -> the hypotheses help even untested; validation is not load-bearing
+  - dream < dream_unvalidated                    -> validation evals cost more budget than confirmed discoveries return
   ('>' / '<' = significant paired difference at alpha; '~' = not significant)"""
 
 
