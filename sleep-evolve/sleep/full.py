@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,7 @@ DEFAULTS: dict[str, Any] = {
     "dream": False,                  # off by default: every existing arm keeps its semantics
     "dream_max": 3,                  # dream hypotheses per REM pass
     "dream_k_sources": 6,            # memory items sampled per dream call (seeded, exploration mix)
+    "dream_k_failures": 2,           # refuted/dead_end items reserved per call — counterfactual substrate
     "dream_max_tokens": 4096, "dream_retries": 1,
     "dream_seed": None,              # None -> deterministic from the sleep step
     "dream_min_strength": 0.0,       # memory items below this strength are not dream sources
@@ -191,7 +193,8 @@ class FullSleep:
         p = self.p
         self.dreamer = Dreamer(k_sources=p["dream_k_sources"], max_dreams=p["dream_max"],
                                dream_max_tokens=p["dream_max_tokens"], retries=p["dream_retries"],
-                               seed=p["dream_seed"] or 0, min_strength=p["dream_min_strength"])
+                               seed=p["dream_seed"] or 0, min_strength=p["dream_min_strength"],
+                               k_failures=p["dream_k_failures"])
         if p["memory_path"]:
             try:
                 self.store = MemoryStore.from_state(
@@ -563,7 +566,9 @@ class FullSleep:
             return
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.store.save_state()), encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(self.store.save_state()), encoding="utf-8")
+        os.replace(tmp, path)
 
     def _refresh_goal(self, best_rec: dict | None, step: int) -> None:
         if best_rec:

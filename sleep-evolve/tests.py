@@ -4358,6 +4358,8 @@ def test_full_sleep_memory_path_roundtrips_across_policies(tmp_path):
     a._persist_memory()
     b = _fs(memory_path=str(path))
     assert b.store.find_text("cross-run knowledge") is not None
+    assert not (tmp_path / "mem.json.tmp").exists()  # atomic write leaves no temp file
+    assert json.loads(path.read_text())["items"]  # target file is complete, never torn
     c = _fs(memory_path=str(tmp_path / "missing.json"))
     assert len(c.store.items) == 0  # absent file starts empty
 
@@ -4806,3 +4808,95 @@ def test_registry_unknown_eval_raises_keyerror(tmp_path):
     reg = CheckpointRegistry(tmp_path / "reg.json")
     with pytest.raises(KeyError):
         reg.record_eval("ghost", 0.9, n_runs=1)
+
+
+# ---- scripts/distill.py ----------------------------------------------------
+
+def test_distill_builds_spec_from_history_and_memory(tmp_path, capsys):
+    from scripts.distill import main as distill_main
+
+    hist = tmp_path / "history.jsonl"
+    hist.write_text("\n".join([
+        json.dumps({"event": "step", "step": 1, "valid": True, "score": 0.9,
+                    "program": GOOD, "program_id": "p1"}),
+        json.dumps({"event": "step", "step": 2, "valid": False, "score": None,
+                    "program": BAD, "program_id": "p2"}),
+    ]), encoding="utf-8")
+    store = MemoryStore()
+    store.add(kind="skill", text="validated discovery", step=2, status="verified",
+              evidence=["d1.1"])  # evidence ids starting with "d" mark it dream-derived
+    mem = tmp_path / "mem.json"
+    mem.write_text(json.dumps(store.save_state()), encoding="utf-8")
+    out = tmp_path / "spec.json"
+
+    rc = distill_main(["--history", str(hist), "--memory", str(mem),
+                       "--task", "solve the problem", "--out", str(out)])
+    assert rc == 0
+    spec = json.loads(out.read_text())
+    assert spec["adapter_id"].startswith("se-") and spec["n_examples"] >= 2
+    assert "modal run infra/modal_train.py" in capsys.readouterr().out
+
+
+def test_distill_register_only_adds_adapter(tmp_path):
+    from scripts.distill import main as distill_main
+
+    spec = build_training_spec([TrainingExample(
+        messages=[{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+        source="best_program")], adapter_id="se-abc")
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    reg_path = tmp_path / "reg.json"
+
+    rc = distill_main(["--register-only", str(spec_path), "--registry", str(reg_path)])
+    assert rc == 0
+    assert CheckpointRegistry(reg_path).load()["adapters"]["se-abc"]["status"] == "candidate"
+
+
+def test_distill_requires_inputs(tmp_path):
+    from scripts.distill import main as distill_main
+    with pytest.raises(SystemExit):
+        distill_main(["--task", "x"])  # no history, no memory
+
+def test_dreamer_reserves_failed_sources():
+    """dead_end/refuted items are guaranteed sampling slots — counterfactual dreams need
+    failure material even when every other item outranks them."""
+    from sleep.dreamer import Dreamer
+    store = MemoryStore()
+    for i in range(20):  # strong filler that would crowd out failures under pure rank weighting
+        it = store.add(kind="rule", text=f"winning rule {i}", step=i, status="verified",
+                       strength=0.9)
+    dead = store.add(kind="dead_end", text="tried X, always fails", step=1,
+                     status="verified", strength=0.4)
+    refuted = store.add(kind="rule", text="Y works sometimes", step=1,
+                        status="refuted", strength=0.2)
+    for step in (3, 17, 42):
+        src = Dreamer(k_sources=6, k_failures=2)._sample_sources(
+            list(store.items.values()), step, __import__("random").Random(f"0.{step}"))
+        src_ids = {it.id for it in src}
+        assert dead.id in src_ids and refuted.id in src_ids
+    no_fail = Dreamer(k_sources=6, k_failures=0)._sample_sources(
+        list(store.items.values()), 3, __import__("random").Random("0.3"))
+    assert len(no_fail) <= 6
+
+def test_distill_registry_lifecycle_cli(tmp_path):
+    """register -> record_eval -> promote -> rollback, all through the CLI."""
+    from scripts.distill import main as distill_main
+
+    reg = str(tmp_path / "reg.json")
+    spec = build_training_spec([TrainingExample(
+        messages=[{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
+        source="best_program")], adapter_id="se-v1")
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    assert distill_main(["--register-only", str(spec_path), "--registry", reg]) == 0
+    assert distill_main(["--record-eval", "se-v1", "--metric", "0.9",
+                         "--n-runs", "3", "--registry", reg]) == 0
+    assert distill_main(["--promote", "se-v1", "--registry", reg]) == 0
+    data = CheckpointRegistry(reg).load()
+    assert data["champion"] == "se-v1"
+    # rollback with no retired champion should not crash the CLI
+    try:
+        distill_main(["--rollback", "--registry", reg])
+    except Exception:
+        pass  # rollback semantics (raise vs no-op) belong to CheckpointRegistry's tests

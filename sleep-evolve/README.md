@@ -105,9 +105,12 @@ across runs/problems so validated discoveries accumulate). Example matrix:
 `configs/dream_openai.yaml`.
 
 Level-2 (weights): `sleep/trainer.py` turns verified items and best programs into SFT examples
-and builds a training spec; `infra/modal_train.py` runs the actual LoRA job on Modal GPU
+and builds a training spec; `scripts/distill.py` is the offline entrypoint
+(`--history` + `--memory` -> spec.json; `--register-only` files the adapter in a
+`CheckpointRegistry`). `infra/modal_train.py` runs the actual LoRA job on Modal GPU
 (`uv run modal run infra/modal_train.py --spec-path spec.json`, adapter ->
 `sleep-evolve-adapters` volume); `CheckpointRegistry` promotes an adapter only on a measured
-improvement and keeps rollback history. Inference APIs never change weights — the only weight
-update path is this pipeline, and serving a promoted adapter needs vLLM's `--enable-lora`
-wiring (a documented follow-up).
+improvement and keeps rollback history. `infra/modal_vllm.py` serves a promoted adapter with
+`SERVE_LORA=<adapter_id>` (vLLM `--enable-lora`); the base model stays reachable at its own
+name for champion/challenger runs. Inference APIs never change weights — this pipeline is the
+only weight-update path.

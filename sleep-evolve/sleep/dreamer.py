@@ -28,8 +28,10 @@ from sleep.memory import MemoryItem, MemoryStore
 class Dreamer:
     def __init__(self, k_sources: int = 6, max_dreams: int = 3, dream_max_tokens: int = 4096,
                  retries: int = 1, seed: int = 0, min_strength: float = 0.0,
-                 temperature_note: str = "vary widely", program_chars: int = 2000):
+                 k_failures: int = 2, temperature_note: str = "vary widely",
+                 program_chars: int = 2000):
         self.k_sources = k_sources
+        self.k_failures = k_failures
         self.max_dreams = max_dreams
         self.dream_max_tokens = dream_max_tokens
         self.retries = retries
@@ -45,7 +47,8 @@ class Dreamer:
         """One dream call. Returns metrics; BudgetExhausted propagates out of llm.complete."""
         rng = rng if rng is not None else random.Random(f"{self.seed}.{step}")  # reproducible
         pool = [it for it in store.items.values()
-                if it.kind != "goal" and it.strength >= self.min_strength]
+                if it.kind != "goal" and (it.strength >= self.min_strength
+                                          or it.status == "refuted" or it.kind == "dead_end")]
         sources = self._sample_sources(pool, step, rng)
         items = [self._item_view(it) for it in sources] + [self._item_view(e) for e in (memory_extra or [])]
         goals = [it for it in store.ordered() if it.kind == "goal"]
@@ -87,17 +90,24 @@ class Dreamer:
 
     # ---- source sampling -----------------------------------------------------------
     def _sample_sources(self, pool: list[MemoryItem], step: int, rng: random.Random) -> list[MemoryItem]:
-        """~1/3 of k_sources uniform at random (exploration), the rest rank-weighted."""
+        """Failed material first (substrate for counterfactuals), then ~1/3 of the remaining
+        slots uniform at random (exploration), the rest rank-weighted."""
         if not pool or self.k_sources <= 0:
             return []
-        n_explore = min(len(pool), max(1, round(self.k_sources / 3)), self.k_sources)
-        explore = rng.sample(pool, n_explore)
+        failures = [it for it in pool if it.status == "refuted" or it.kind == "dead_end"]
+        n_fail = min(len(failures), max(0, self.k_failures), self.k_sources)
+        chosen_failures = rng.sample(failures, n_fail)
+        chosen = {it.id for it in chosen_failures}
+        pool = [it for it in pool if it.id not in chosen]
+        k_rest = self.k_sources - n_fail
+        n_explore = min(len(pool), max(1, round(k_rest / 3)), k_rest)
+        explore = rng.sample(pool, n_explore) if n_explore else []
         chosen = {it.id for it in explore}
         rest = [it for it in pool if it.id not in chosen]
         weights = [it.rank * (1.0 + (0.5 if it.last_supported_step < step - 20 else 0.0))
                    for it in rest]
-        weighted = self._weighted_sample(rest, weights, self.k_sources - n_explore, rng)
-        return explore + weighted
+        weighted = self._weighted_sample(rest, weights, k_rest - n_explore, rng)
+        return chosen_failures + explore + weighted
 
     @staticmethod
     def _weighted_sample(items: list[MemoryItem], weights: list[float], k: int,
