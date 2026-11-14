@@ -85,8 +85,88 @@ def p36_check_construction(solution: Any, params: dict[str, Any]) -> dict[str, A
     return {"valid": True, "value": float(np.sum(radii)), "messages": msgs}
 
 
+def p50_ratio_squared(solution: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Port of the verification cell for the max/min-distance-ratio problem
+    (mathematical_results.ipynb, cell 94): shape (n, d), pdist, (max/min)^2."""
+    n, d = int(params["n"]), int(params["d"])
+    raw = solution.get("points") if isinstance(solution, dict) else solution
+    try:
+        pts = np.asarray(raw, dtype=float)
+    except (TypeError, ValueError) as e:
+        return {"valid": False, "value": None, "messages": [f"bad construction: {e}"]}
+    if pts.shape != (n, d) or not np.isfinite(pts).all():
+        return {"valid": False, "value": None,
+                "messages": [f"points must be a finite ({n}, {d}) array, got {pts.shape}"]}
+    diff = pts[:, None, :] - pts[None, :, :]
+    dist = np.sqrt((diff**2).sum(-1))
+    iu, ju = np.triu_indices(n, k=1)
+    pair = dist[iu, ju]
+    mn, mx = float(pair.min()), float(pair.max())
+    if mn <= 0:
+        return {"valid": False, "value": None, "messages": ["min pairwise distance is 0"]}
+    return {"valid": True, "value": (mx / mn) ** 2,
+            "messages": [f"ratio of max distance to min distance: sqrt({(mx / mn) ** 2})"]}
+
+
+def p59_verify_construction(solution: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Port of verify_construction (subsets_of_the_grid_with_no_isosceles_triangles.ipynb):
+    invalid iff some ordered triple of distinct points (a, b, c) has d(a,b) == d(b,c).
+    The per-apex distance-multiset check is the same condition, in O(|S|^2)."""
+    raw = solution.get("points") if isinstance(solution, dict) else solution
+    try:
+        pts = np.asarray(raw, dtype=float)
+    except (TypeError, ValueError) as e:
+        return {"valid": False, "value": None, "messages": [f"bad construction: {e}"]}
+    if pts.ndim != 2 or pts.shape[1] != 2 or not np.isfinite(pts).all():
+        return {"valid": False, "value": None, "messages": ["points must be a (k, 2) array"]}
+    pts = pts.astype(np.int64)
+    for i in range(len(pts)):
+        d2 = (pts[:, 0] - pts[i, 0]) ** 2 + (pts[:, 1] - pts[i, 1]) ** 2
+        d2[i] = -1
+        vals, counts = np.unique(d2, return_counts=True)
+        if (counts > 1).any():
+            v = int(vals[np.nonzero(counts > 1)[0][0]])
+            return {"valid": False, "value": None,
+                    "messages": [f"isosceles apex at point {tuple(pts[i])} (distance^2 = {v})"]}
+    return {"valid": True, "value": float(len(pts)),
+            "messages": ["no isosceles triangle (incl. degenerate flat case)"]}
+
+
+def p7_get_score(solution: Any, params: dict[str, Any]) -> dict[str, Any]:
+    """Port of get_score (difference_bases.ipynb, cell 1): int() coercion, dedupe+sort,
+    append 0 if missing, |B| > 2000 invalid, n = largest prefix covered by differences,
+    value = |B|^2 / n. The notebook's -100 sentinel (1 uncovered) is reported invalid."""
+    raw = solution.get("basis") if isinstance(solution, dict) else solution
+    if not isinstance(raw, (list, tuple)):
+        return {"valid": False, "value": None, "messages": ["construction must be a list of numbers"]}
+    coerced = []
+    for x in raw:
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not np.isfinite(x):
+            return {"valid": False, "value": None, "messages": ["invalid element in list"]}
+        coerced.append(int(x))
+    b = sorted(set(coerced))
+    if 0 not in b:
+        b.append(0)
+    if len(b) > int(params.get("max_set_size", 2000)):
+        return {"valid": False, "value": None, "messages": [f"|B| = {len(b)} > max set size"]}
+    diffs = {b[j] - b[i] for i in range(len(b)) for j in range(i + 1, len(b))}
+    max_diff = max(diffs) if diffs else 0
+    for v in range(1, max_diff + 2):
+        if v not in diffs:
+            if v == 1:
+                return {"valid": False, "value": None,
+                        "messages": ["difference 1 not covered (notebook returns -100)"]}
+            return {"valid": True, "value": len(b) ** 2 / (v - 1),
+                    "messages": [f"n = {v - 1}, |B| = {len(b)}"]}
+    return {"valid": True, "value": len(b) ** 2 / max_diff if max_diff else None,
+            "messages": ["all differences covered"]}
+
+
 PUBLISHED_SCORERS: dict[str, Callable[[Any, dict[str, Any]], dict[str, Any]]] = {
     "p36_check_construction": p36_check_construction,
+    "p50_ratio_squared": p50_ratio_squared,
+    "p59_verify_construction": p59_verify_construction,
+    "p7_get_score": p7_get_score,
 }
 
 

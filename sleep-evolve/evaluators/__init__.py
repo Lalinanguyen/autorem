@@ -6,11 +6,17 @@ from typing import Callable
 
 from evaluators.base import EvalResult, Evaluator
 from evaluators.mock import MockEvaluator
+from evaluators.p7_difference_bases import DifferenceBasis
 from evaluators.p36_circle_packing import CirclePacking26
+from evaluators.p50_max_min_ratio import MaxMinRatio16
+from evaluators.p59_no_isosceles import NoIsoscelesGrid64
 
 REGISTRY: dict[int, Callable[..., Evaluator]] = {
     0: MockEvaluator,
+    7: DifferenceBasis,
     36: CirclePacking26,
+    50: MaxMinRatio16,
+    59: NoIsoscelesGrid64,
 }
 
 

@@ -8,8 +8,9 @@ An agent proposes programs, an evaluator scores them, and every step is logged. 
 in place of the raw history. Sleep policies are compared at a **matched total token budget**: sleep
 tokens and agent tokens draw from the same `Budget`.
 
-This is a scaffold: one real path end to end (problem 36 + `no_sleep`/`summarize`), with mocks for
-everything else.
+Real evaluators exist for problems 7 (difference bases), 36 (circle packing), 50 (max/min distance
+ratio) and 59 (no-isosceles grid subsets); each reproduces its published AlphaEvolve construction
+(see `verify_problem`). Everything else is mocked.
 
 ## Setup
 
@@ -42,6 +43,9 @@ Each run writes `runs/<run_id>/history.jsonl`, `summary.json` and `best_program.
 | `evaluators/base.py` | `EvalResult`, `Evaluator` protocol, subprocess sandbox (`run_program`), `normalized_score` |
 | `evaluators/mock.py` | problem 0: cheap quadratic for tests |
 | `evaluators/p36_circle_packing.py` | problem 36: 26 circles in the unit square, max sum of radii |
+| `evaluators/p7_difference_bases.py` | problem 7: integer set B covering differences 1..n, min \|B\|²/n |
+| `evaluators/p50_max_min_ratio.py` | problem 50: 16 planar points, min (max/min pairwise distance)² |
+| `evaluators/p59_no_isosceles.py` | problem 59: largest isosceles-free subset of the 64x64 grid |
 | `llm/client.py` | `LLMClient.complete(messages, *, role, max_tokens)`: the only path to the API |
 | `llm/mock.py` | deterministic mock transport with fixed usage |
 | `harness/budget.py` | `Budget`: one total for agent + sleep, raises `BudgetExhausted` |
