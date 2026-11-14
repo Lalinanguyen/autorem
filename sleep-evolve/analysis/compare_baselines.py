@@ -246,6 +246,15 @@ def arm_summaries(runs: list[BaselineRun]) -> dict[str, dict]:
             "items_added_mean": _nanmean([m.get("items_added") for m in mem]),
             "items_evicted_mean": _nanmean([m.get("items_evicted") for m in mem]),
             "replays_wasted_mean": _nanmean([m.get("replays_wasted") for m in mem]),
+            "dreams_validated_mean": _nanmean([m.get("dreams_validated") for m in mem]),
+            "dreams_total_mean": _nanmean([
+                sum(m.get(k) or 0 for k in ("dreams_validated", "dreams_refuted",
+                                            "dreams_uncertain", "dreams_untested")) or None
+                for m in mem]),
+            "dream_hit_rate_mean": _nanmean([
+                (m["dreams_validated"] / (m["dreams_validated"] + m["dreams_refuted"]))
+                if (m.get("dreams_validated") or 0) + (m.get("dreams_refuted") or 0) else None
+                for m in mem]),
             "evals_used_mean": _nanmean([run_evals(r)[0] for r in rs]),
             "evals_agent_mean": _nanmean([run_evals(r)[1] for r in rs]),
             "evals_sleep_mean": _nanmean([run_evals(r)[2] for r in rs]),

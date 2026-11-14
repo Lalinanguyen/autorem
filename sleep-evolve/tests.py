@@ -3298,7 +3298,9 @@ def test_summary_metrics_schema(matrix):
     assert b["window"] == 5 and len(b["around_sleeps"]) == m["sleep"]["llm_sleeps"]
     for k in ("overall", "before_sleep", "after_sleep"):
         assert set(b[k]) == {"perseveration_rate", "invalid_rate", "calibration_error", "n"}
-    assert set(m["memory"]) == {"items_added", "items_evicted", "replays_wasted", "replays_run"}
+    assert set(m["memory"]) == {"items_added", "items_evicted", "replays_wasted", "replays_run",
+                                    "dream_calls", "dream_evaluations", "dreams_validated",
+                                    "dreams_refuted", "dreams_uncertain", "dreams_untested"}
     assert m["memory"]["items_added"] > 0
     assert _msum(matrix, "no_sleep", 0)["metrics"]["memory"]["items_added"] == 0
     assert _msum(matrix, "fixed_letta", 0)["arm"] == "fixed_letta"
@@ -4329,3 +4331,478 @@ def test_summarize_uses_sleep_max_tokens_for_the_completion_cap():
     llm = LLMClient(Budget(10**6), transport, sleep_fn=lambda s: None)
     out = pol.sleep("task", "", [], llm, None)
     assert calls == [777] and out == "notes"
+
+
+# ================================================================================================
+# Section 17 · REM dreaming, cross-run memory, dream ladder arms
+# ================================================================================================
+
+from sleep.dreamer import Dreamer  # noqa: E402
+
+
+def test_memory_store_save_load_roundtrip():
+    s = MemoryStore()
+    s.add(kind="goal", text="g0 text", step=0, status="verified", strength=1.0, item_id="g0")
+    it = s.add(kind="skill", text="hex init helps", step=3, status="verified",
+               evidence=[1, 2], approach_tags=["Hex Init"])
+    s2 = MemoryStore.from_state(json.loads(json.dumps(s.save_state())))
+    assert s2.render(None) == s.render(None)
+    assert s2.get(it.id).evidence == it.evidence and s2.get(it.id).status == "verified"
+    assert s2.add(kind="fact", text="new claim", step=4).id != it.id  # id counter restored
+
+
+def test_full_sleep_memory_path_roundtrips_across_policies(tmp_path):
+    path = tmp_path / "mem.json"
+    a = _fs(memory_path=str(path))
+    a.store.add(kind="skill", text="cross-run knowledge", step=1, status="verified")
+    a._persist_memory()
+    b = _fs(memory_path=str(path))
+    assert b.store.find_text("cross-run knowledge") is not None
+    c = _fs(memory_path=str(tmp_path / "missing.json"))
+    assert len(c.store.items) == 0  # absent file starts empty
+
+
+def test_full_sleep_rem_pass_dreams_and_validates(mock_llm):
+    body_c = {"claims": [], "replays": [], "goals": [], "merges": []}
+    body_d = {"dreams": [{"did": "d1", "kind": "association",
+                          "text": "hex init plus lattice gives a jump",
+                          "sources": ["m1"], "rationale": "combines two wins",
+                          "test": {"control": BAD, "treatment": GOOD,
+                                   "change": "return 0.7s instead of 0s"}}]}
+    llm, budget, _ = mock_llm(10**6, script=[json.dumps(body_c), json.dumps(body_d)])
+    fs = _fs(dream=True)
+    fs.store.add(kind="fact", text="hex init helped once", step=1)
+    m = fs.consolidate("task", _sleep_history(), llm, budget, step=20, mode="rem")
+    assert m["dream_calls"] >= 1 and m["dreams_validated"] == 1 and m["dream_evaluations"] == 2
+    assert m["dreams"][0]["status"] == "validated" and m["dreams"][0]["did"] == "d1"
+    assert m["dreams"][0]["sources"] == ["m1"] and m["dreams"][0]["rationale"]
+    item = fs.store.find_text("hex init plus lattice gives a jump")
+    assert item is not None and item.status == "verified" and item.kind == "skill"
+
+
+def test_dream_pass_skips_when_budget_low(mock_llm):
+    llm, budget, t = mock_llm(10_000)
+    budget.charge("agent", 1, 9_000)  # remaining 999 < dream_min_budget_tokens (8192)
+    fs = _fs(dream=True)
+    m = fs.consolidate("task", _sleep_history(), llm, budget, step=20, mode="rem")
+    assert m["dream_skipped"] == "low_budget" and m["dream_calls"] == 0
+    assert t.sleep_calls == 1  # only the consolidator call ran
+
+
+def test_dream_off_by_default_makes_no_dream_calls(mock_llm):
+    llm, budget, t = mock_llm(10_000, script=[json.dumps({"claims": [], "replays": []})])
+    fs = _fs()  # dream defaults False
+    m = fs.consolidate("task", _sleep_history(), llm, budget, step=20, mode="rem")
+    assert "dreams" not in m and len(t.calls) == 1  # consolidator only, no dream call
+
+
+def test_dream_ladder_arms_exist():
+    from harness.baselines import ARM_SPECS
+    for arm in ("summarize", "dream_unvalidated", "dream", "dream_distill"):
+        assert arm in ARM_SPECS
+    assert ARM_SPECS["dream_unvalidated"].params["dream_validate"] is False
+    assert ARM_SPECS["dream"].params["dream"] is True
+    assert "memory_path" in ARM_SPECS["dream_distill"].declared
+
+
+# ==============================================================================================
+# Section 18 · REM dreaming: dream_io validation, Dreamer sampling, dream A/B validation
+# ==============================================================================================
+
+from sleep.dream_io import validate_dreams as parse_dreams  # noqa: E402  (validator shares the name)
+from sleep.insight_validator import validate_dreams  # noqa: E402
+
+HALF = "def construct():\n    return [0.5, 0.5, 0.5, 0.5, 0.5]\n"
+
+
+def make_llm(script: list[str], total: int = 100000):
+    """(LLMClient, Budget, MockTransport): scripted replies, fixed usage, no sleeping."""
+    budget = Budget(total)
+    transport = MockTransport(script=script)
+    return LLMClient(budget, transport, sleep_fn=lambda s: None), budget, transport
+
+
+def make_store(n: int = 6, *, step: int = 0) -> MemoryStore:
+    """g0 goal plus n tentative skills m1..mn with distinct tags and rising strength."""
+    store = MemoryStore()
+    store.add(kind="goal", text="Maximize the score. Best valid score so far: 0.5.",
+              step=step, status="verified", strength=1.0, item_id="g0")
+    for i in range(n):
+        store.add(kind="skill", text=f"strategy {i} raises the score", step=step,
+                  status="tentative", strength=0.3 + 0.05 * i, approach_tags=[f"tag-{i}"])
+    return store
+
+
+STEP_RECORDS = [
+    {"id": 1, "approach_tags": ["uniform-init"], "score": 0.2, "valid": True, "side_info": None},
+    {"id": 2, "approach_tags": ["perturb-parent"], "score": 0.4, "valid": True, "side_info": None},
+]
+
+
+def dream_obj(*, text: str = "pushing every coordinate to 0.7 raises the score",
+              test=None, kind: str = "association", sources=None) -> dict:
+    """One-dream object; test=None attaches the HALF-vs-GOOD test, test="null" -> null."""
+    t = {"control": HALF, "treatment": GOOD, "change": "0.5 -> 0.7"} if test is None \
+        else (None if test == "null" else test)
+    return {"dreams": [{"did": "d1", "kind": kind, "text": text,
+                        "sources": sources if sources is not None else ["m1"],
+                        "rationale": "m1 already points at 0.7", "test": t}]}
+
+
+DREAMS_JSON = json.dumps({"dreams": [
+    {"did": "d1", "kind": "association", "text": "pushing every coordinate to 0.7 raises the score",
+     "sources": ["m1", "m2"], "rationale": "both point at the target",
+     "test": {"control": HALF, "treatment": GOOD, "change": "0.5 -> 0.7"}},
+    {"did": "d2", "kind": "extrapolation", "text": "an untried direction may help",
+     "sources": ["m3", "2"], "rationale": "no memory covers it", "test": None},
+]})
+
+
+# ---- dream_io.validate_dreams ------------------------------------------------------------
+
+def test_parse_good_dreams():
+    dreams, problems = parse_dreams(json.loads(DREAMS_JSON), max_dreams=5)
+    assert problems == [] and len(dreams) == 2
+    d1, d2 = dreams
+    assert d1["did"] == "d1" and d1["kind"] == "association"
+    assert d1["sources"] == ["m1", "m2"] and d1["test"]["treatment"] == GOOD
+    assert d2["kind"] == "extrapolation" and d2["test"] is None
+
+
+def test_parse_drops_bad_entries_and_normalizes():
+    obj = {"dreams": [
+        "nope",                                                   # not an object
+        {"did": "d1", "kind": "weird", "text": "keep me", "sources": "m1"},  # kind -> association
+        {"did": "d2", "kind": "association", "text": "   "},       # empty text
+        {"did": "d1", "kind": "association", "text": "dup did"},   # duplicate did
+        {"did": "d3", "kind": "counterfactual", "text": "ok", "sources": [1, "m2", {}]},
+    ]}
+    dreams, problems = parse_dreams(obj, max_dreams=5)
+    assert [d["did"] for d in dreams] == ["d1", "d3"]
+    assert dreams[0]["kind"] == "association" and dreams[0]["sources"] == ["m1"]
+    assert dreams[1]["sources"] == ["1", "m2"]
+    assert len(problems) == 3
+
+
+def test_parse_tolerates_garbage_and_caps_count():
+    dreams, problems = parse_dreams([1, 2, 3], max_dreams=3)
+    assert dreams == [] and problems == ["not an object"]
+    dreams, problems = parse_dreams({"dreams": "nope"}, max_dreams=3)
+    assert dreams == [] and "dreams is not a list" in problems
+    many = {"dreams": [{"did": f"d{i}", "text": f"dream {i}"} for i in range(10)]}
+    dreams, problems = parse_dreams(many, max_dreams=3)
+    assert len(dreams) == 3 and all(len(d["text"]) <= 300 for d in dreams)
+
+
+# ---- Dreamer -----------------------------------------------------------------------------
+
+def test_dreamer_sampling_is_reproducible_and_seeded():
+    llm, _, _ = make_llm([DREAMS_JSON])
+    m1 = Dreamer(seed=7, k_sources=4).dream("task", make_store(10), STEP_RECORDS, llm, step=5)
+    llm, _, _ = make_llm([DREAMS_JSON])
+    m2 = Dreamer(seed=7, k_sources=4).dream("task", make_store(10), STEP_RECORDS, llm, step=5)
+    assert m1["dream_source_ids"] == m2["dream_source_ids"]
+    assert len(m1["dream_source_ids"]) == 4 and "g0" not in m1["dream_source_ids"]
+    seen = set()
+    for s in range(6):  # different seeds should not all draw the same sources
+        llm, _, _ = make_llm([DREAMS_JSON])
+        m = Dreamer(seed=s, k_sources=4).dream("task", make_store(10), [], llm, step=5)
+        seen.add(tuple(m["dream_source_ids"]))
+    assert len(seen) > 1
+
+
+def test_dreamer_parses_metrics_and_charges_sleep_budget():
+    llm, budget, transport = make_llm([DREAMS_JSON])
+    d = Dreamer(seed=0)
+    m = d.dream("the dream task", make_store(), STEP_RECORDS, llm, step=3)
+    assert m["dream_calls"] == 1 and m["n_dreams"] == 2
+    assert m["dream_parse_error"] is None and m["dream_source_ids"]
+    assert budget.sleep_tokens > 0 and budget.agent_tokens == 0
+    user = transport.calls[0][-1]["content"]
+    assert "<dream_directive>" in user and d.last_prompt == user
+
+
+def test_dreamer_retries_garbage_once():
+    llm, _, _ = make_llm(["no json here", DREAMS_JSON])
+    m = Dreamer(seed=0, retries=1).dream("t", make_store(), [], llm, step=1)
+    assert m["dream_calls"] == 2 and m["n_dreams"] == 2 and m["dream_parse_error"] is None
+
+
+def test_dreamer_empty_store_and_strength_filter_still_calls():
+    llm, _, _ = make_llm([DREAMS_JSON])
+    m = Dreamer(seed=0, min_strength=0.99).dream("t", make_store(), [], llm, step=1)
+    assert m["dream_calls"] == 1 and m["dream_source_ids"] == []
+    llm, _, _ = make_llm([DREAMS_JSON])
+    m = Dreamer(seed=0).dream("t", MemoryStore(), [], llm, step=1)
+    assert m["dream_calls"] == 1 and m["dream_source_ids"] == []
+
+
+# ---- insight_validator.validate_dreams ---------------------------------------------------
+
+def test_validator_confirms_better_treatment_and_adds_verified_skill():
+    store = make_store()
+    dreams, _ = parse_dreams(dream_obj(), max_dreams=3)
+    out = validate_dreams(dreams, store, TextEvaluator(), step=5, max_tests=3)
+    assert out["validated"] == 1 and out["evaluations"] == 2
+    rec = out["records"][0]
+    assert rec["status"] == "validated" and rec["replay_rid"] == "d5.0"
+    assert rec["score_diff"] > 0 and rec["decision_reason"]
+    skill = store.find_text("pushing every coordinate to 0.7 raises the score")
+    assert skill is not None and skill.kind == "skill" and skill.status == "verified"
+    assert skill.evidence[0] == "d5.0" and "m1" in skill.evidence
+    assert "tag-0" in skill.approach_tags  # union of the source item's tags
+
+
+def test_validator_refutes_worse_treatment():
+    store = make_store()
+    obj = dream_obj(text="0.0 beats 0.7", test={"control": GOOD, "treatment": BAD, "change": "0.7 -> 0.0"})
+    dreams, _ = parse_dreams(obj, max_dreams=3)
+    out = validate_dreams(dreams, store, TextEvaluator(), step=6, max_tests=3)
+    assert out["refuted"] == 1 and out["validated"] == 0
+    item = store.find_text("0.0 beats 0.7")
+    assert item is not None and item.status == "refuted"
+    assert out["edits"][0]["op"] == "refute" and out["edits"][0]["source"] == "dream"
+
+
+def test_validator_untested_and_identical_programs():
+    store = make_store()
+    dreams, _ = parse_dreams(dream_obj(test="null"), max_dreams=3)  # test: null
+    out = validate_dreams(dreams, store, TextEvaluator(), step=1, max_tests=3)
+    assert out["untested"] == 1 and out["evaluations"] == 0
+    item = store.find_text("pushing every coordinate to 0.7 raises the score")
+    assert item is not None and item.status == "tentative"
+    same = {"control": GOOD, "treatment": GOOD, "change": "none"}
+    dreams, _ = parse_dreams(dream_obj(text="identical programs test", test=same), max_dreams=3)
+    ev = TextEvaluator()
+    out = validate_dreams(dreams, store, ev, step=1, max_tests=3)
+    assert out["untested"] == 1 and out["evaluations"] == 0 and ev.calls == []
+    out = validate_dreams(dreams, store, ev, step=2, max_tests=3)  # text already in store
+    assert out["edits_applied"] == 0
+
+
+def test_records_keep_did_sources_and_rationale():
+    dreams, _ = parse_dreams(json.loads(DREAMS_JSON), max_dreams=5)
+    out = validate_dreams(dreams, make_store(), TextEvaluator(), step=9, max_tests=5)
+    for rec, d in zip(out["records"], dreams):
+        assert rec["did"] == d["did"] and rec["sources"] == d["sources"]
+        assert rec["rationale"] == d["rationale"] and rec["kind"] == d["kind"]
+
+
+def test_evaluations_are_charged_to_the_eval_budget():
+    store = make_store()
+    dreams, _ = parse_dreams(json.loads(DREAMS_JSON), max_dreams=5)
+    budget = EvalBudget(10)
+    ev = CountingEvaluator(TextEvaluator(), budget, role="sleep")
+    out = validate_dreams(dreams, store, ev, step=2, max_tests=5)
+    assert out["evaluations"] == 2  # only d1 has a test
+    assert budget.sleep_evals == 2 and budget.used == 2
+
+
+def test_evaluator_none_skips_all_testing():
+    store = make_store()
+    dreams, _ = parse_dreams(json.loads(DREAMS_JSON), max_dreams=5)
+    out = validate_dreams(dreams, store, None, step=1, max_tests=5)
+    assert out["evaluations"] == 0 and out["untested"] == len(dreams) == 2
+    assert out["validated"] == out["refuted"] == out["uncertain"] == 0
+    assert all(r["status"] == "untested" for r in out["records"])
+    assert out["edits_applied"] == 2  # both hypotheses kept as tentative skills
+
+
+def test_end_to_end_dreamer_then_validator():
+    store = make_store()
+    llm, _, _ = make_llm([DREAMS_JSON])
+    m = Dreamer(seed=0).dream("task", store, STEP_RECORDS, llm, step=4)
+    out = validate_dreams(m["dreams"], store, TextEvaluator(), step=4, max_tests=5)
+    assert out["evaluations"] > 0 and out["validated"] == 1
+    verified = [i for i in store.items.values() if i.kind == "skill" and i.status == "verified"]
+    assert verified and any("d4." in str(e) for i in verified for e in i.evidence)
+
+
+# ==============================================================================================
+# Section 19 · Parametric learning: example collection, training spec, checkpoint registry
+# ==============================================================================================
+
+from sleep.trainer import (
+    CheckpointRegistry,
+    TrainingExample,
+    build_training_spec,
+    collect_examples,
+)  # noqa: E402
+
+
+TASK = "Write construct() returning 5 floats; score = 1 - mean((x - 0.7)^2)."
+
+
+def history() -> list[dict]:
+    """Step records: valid steps at 0/1/3 (1 and 3 share program text), invalid at 2, a sleep line."""
+    return [
+        {"event": "step", "step": 0, "valid": True, "score": 0.40,
+         "program": "def construct():\n    return [0.5] * 5\n", "program_id": "a"},
+        {"event": "step", "step": 1, "valid": True, "score": 0.90,
+         "program": "def construct():\n    return [0.7] * 5\n", "program_id": "b"},
+        {"event": "step", "step": 2, "valid": False, "score": None,
+         "program": "def construct():\n    raise X\n", "program_id": "c"},
+        {"event": "step", "step": 3, "valid": True, "score": 0.70,
+         "program": "def construct():\n    return [0.7] * 5\n", "program_id": "d"},
+        {"event": "sleep", "step": 3, "valid": None, "score": None, "program": None},
+    ]
+
+
+def store() -> MemoryStore:
+    s = MemoryStore()
+    s.add(kind="skill", text="anneal values toward the target", step=3,
+          status="verified", evidence=["d3"])
+    s.add(kind="rule", text="never return fewer than 5 numbers", step=4,
+          status="verified", evidence=["r4.0"])
+    s.add(kind="fact", text="an irrelevant verified fact", step=4, status="verified")
+    s.add(kind="skill", text="a merely tentative skill", step=4, status="tentative")
+    return s
+
+
+def test_collect_examples_builds_expected_pairs():
+    exs = collect_examples(TASK, store(), history())
+    by_src = {}
+    for e in exs:
+        by_src.setdefault(e.source, []).append(e)
+    # best programs, best-first, deduped: the 0.9 program, then the 0.4 one
+    progs = by_src["best_program"]
+    assert [e.messages[-1]["content"] for e in progs] == [
+        "def construct():\n    return [0.7] * 5\n", "def construct():\n    return [0.5] * 5\n"]
+    assert progs[0].meta["score"] == 0.90 and progs[0].meta["program_id"] == "b"
+    assert TASK in progs[0].messages[0]["content"]
+    assert "Best score so far: 0.4" in progs[0].messages[0]["content"]  # running best before step 1
+    # verified store items: the rule at 0.5, the dream-evidenced skill at 1.0
+    assert by_src["verified_item"][0].weight == 0.5
+    assert by_src["verified_item"][0].messages[-1]["content"] == "never return fewer than 5 numbers"
+    assert by_src["dream"][0].weight == 1.0
+    # non-verified and non-skill/rule items never appear
+    texts = [e.messages[-1]["content"] for e in exs]
+    assert "an irrelevant verified fact" not in texts and "a merely tentative skill" not in texts
+
+
+def test_collect_examples_best_k_min_score_and_dreams_flag():
+    h, s = history(), store()
+    exs = collect_examples(TASK, s, h, best_k=1)
+    assert [e.source for e in exs].count("best_program") == 1
+    exs = collect_examples(TASK, s, h, min_score=0.8)
+    assert all(e.meta.get("score", 1) >= 0.8 for e in exs if e.source == "best_program")
+    assert len([e for e in exs if e.source == "best_program"]) == 1
+    # include_dreams=False drops the dream-derived item entirely
+    exs = collect_examples(TASK, s, h, include_dreams=False)
+    assert "dream" not in [e.source for e in exs]
+    assert any(e.source == "verified_item" for e in exs)
+
+
+def test_collect_examples_empty_inputs_and_cap():
+    assert collect_examples(TASK, MemoryStore(), []) == []
+    exs = collect_examples(TASK, store(), history(), max_examples=2)
+    assert len(exs) == 2 and exs[0].source == "best_program"
+
+
+def test_collect_examples_is_deterministic():
+    a = [e.to_jsonl() for e in collect_examples(TASK, store(), history())]
+    b = [e.to_jsonl() for e in collect_examples(TASK, store(), history())]
+    assert a == b
+
+
+def test_training_example_jsonl_roundtrip():
+    e = collect_examples(TASK, store(), history())[0]
+    d = json.loads(e.to_jsonl())
+    assert d["source"] == e.source and d["messages"] == e.messages and d["weight"] == e.weight
+    with pytest.raises(ValueError):
+        TrainingExample(messages=[], source="made_up")
+
+
+def test_build_training_spec_refuses_empty_and_is_deterministic():
+    with pytest.raises(ValueError):
+        build_training_spec([])
+    exs = collect_examples(TASK, store(), history())
+    s1 = build_training_spec(exs)
+    s2 = build_training_spec(exs)
+    assert s1 == s2 and s1["adapter_id"].startswith("se-")
+    assert (s1["base_model"], s1["lora_rank"], s1["lora_alpha"], s1["epochs"]) == \
+        ("Qwen/Qwen3-8B", 16, 32, 1)
+    assert s1["n_examples"] == len(exs)
+    lines = s1["examples_jsonl"].splitlines()
+    assert len(lines) == len(exs) and json.loads(lines[0])["source"] == "best_program"
+    assert build_training_spec(exs, adapter_id="mine")["adapter_id"] == "mine"
+
+
+def test_registry_register_and_duplicate(tmp_path):
+    reg = CheckpointRegistry(tmp_path / "reg.json")
+    rec = reg.register("a1", base_model="Qwen/Qwen3-8B", train_meta={"n": 10})
+    assert rec["status"] == "candidate" and rec["evals"] == [] and rec["registered_at"]
+    with pytest.raises(ValueError):
+        reg.register("a1", base_model="x", train_meta={})
+    assert reg.champion() is None
+
+
+def test_registry_promotion_lifecycle(tmp_path):
+    reg = CheckpointRegistry(tmp_path / "reg.json")
+    reg.register("a1", base_model="m", train_meta={})
+    reg.register("a2", base_model="m", train_meta={})
+    # no evals -> can never be promoted, even with no champion
+    assert reg.promote_if_better("a1")["promoted"] is False
+    reg.record_eval("a1", 0.50, n_runs=8)
+    r = reg.promote_if_better("a1")
+    assert r["promoted"] and r["champion"] == "a1"
+    assert reg.champion()["adapter_id"] == "a1"
+    # strictly better promotes and retires the old champion
+    reg.record_eval("a2", 0.60, n_runs=8, note="held-out")
+    r = reg.promote_if_better("a2")
+    assert r["promoted"] and r["champion"] == "a2"
+    assert reg._data["adapters"]["a1"]["status"] == "retired"
+    # equal (or worse) does not promote
+    reg.register("a3", base_model="m", train_meta={})
+    reg.record_eval("a3", 0.60, n_runs=8)
+    assert reg.promote_if_better("a3")["promoted"] is False
+    reg.record_eval("a3", 0.55, n_runs=8)
+    assert reg.promote_if_better("a3")["promoted"] is False
+
+
+def test_registry_min_delta(tmp_path):
+    reg = CheckpointRegistry(tmp_path / "reg.json")
+    reg.register("a1", base_model="m", train_meta={})
+    reg.register("a2", base_model="m", train_meta={})
+    reg.record_eval("a1", 0.50, n_runs=4)
+    reg.promote_if_better("a1")
+    reg.record_eval("a2", 0.55, n_runs=4)
+    assert reg.promote_if_better("a2", min_delta=0.1)["promoted"] is False
+    reg.record_eval("a2", 0.61, n_runs=4)  # latest eval wins the comparison
+    assert reg.promote_if_better("a2", min_delta=0.1)["promoted"] is True
+
+
+def test_registry_rollback_restores_previous_champion(tmp_path):
+    reg = CheckpointRegistry(tmp_path / "reg.json")
+    for aid, metric in (("a1", 0.5), ("a2", 0.6)):
+        reg.register(aid, base_model="m", train_meta={})
+        reg.record_eval(aid, metric, n_runs=4)
+        reg.promote_if_better(aid)
+    assert reg.champion()["adapter_id"] == "a2"
+    r = reg.rollback()
+    assert r["rolled_back"] and r["champion"] == "a1"
+    assert reg.champion()["adapter_id"] == "a1"
+    assert reg._data["adapters"]["a2"]["status"] == "retired"
+    # a fresh registry with nothing to roll back to fails cleanly
+    reg2 = CheckpointRegistry(tmp_path / "other.json")
+    assert reg2.rollback()["rolled_back"] is False
+
+
+def test_registry_persists_and_rejects_corruption(tmp_path):
+    path = tmp_path / "reg.json"
+    reg = CheckpointRegistry(path)
+    reg.register("a1", base_model="m", train_meta={"seed": 1})
+    reg.record_eval("a1", 0.7, n_runs=4)
+    reg.promote_if_better("a1")
+    reg2 = CheckpointRegistry(path)  # re-instantiation sees the same state
+    assert reg2.champion()["adapter_id"] == "a1"
+    assert reg2._data["adapters"]["a1"]["train_meta"] == {"seed": 1}
+    path.write_text("{not json")
+    with pytest.raises(ValueError):
+        CheckpointRegistry(path)
+
+
+def test_registry_unknown_eval_raises_keyerror(tmp_path):
+    reg = CheckpointRegistry(tmp_path / "reg.json")
+    with pytest.raises(KeyError):
+        reg.record_eval("ghost", 0.9, n_runs=1)

@@ -15,7 +15,15 @@ One sleep (`consolidate`):
   6. merges of near-duplicate items (MemoryStore.merge), then goals: up to `max_goals` one-sentence
      goals (g1, g2, ...) after g0, each replacing a stale goal or added (oldest pushed out)
   7. decay (items not touched this sleep; goals never), evict, optional REM schema abstraction
+  8. REM only: dreaming (sleep/dreamer.py) — recombine memory items and steps into novel
+     hypotheses (association / counterfactual / extrapolation), then validate each in the
+     sandbox (sleep/insight_validator.py): a dream is NEVER trusted — confirmed -> verified,
+     refuted -> refuted, uncertain/untested -> tentative; validation evals share the run's
+     EvalBudget through the bound (sleep-tagged) evaluator. Skipped below dream_min_budget_tokens.
 The agent then sees `memory_section(cap)`, the rendered store, never raw history.
+With `memory_path` set, the store is loaded at construction and saved after every consolidate:
+validated discoveries persist across runs and problems (cross-run memory for the dream-ladder's
+distillation arm; a shared file is last-write-wins — not for parallel runs).
 
 Every mechanism has a flag (see DEFAULTS). All LLM calls go through llm.complete(role="sleep");
 BudgetExhausted propagates to the caller.
@@ -53,6 +61,7 @@ from __future__ import annotations
 
 import json
 import math
+from pathlib import Path
 from typing import Any
 
 from harness.context import count_tokens, fit_lines
@@ -62,6 +71,8 @@ from sleep.consolidator_io import (
     CONSOLIDATOR_SYSTEM, CONSOLIDATOR_USER, NREM_NOTE, REM_NOTE, RETRY_NOTE, parse_json_object, step_view,
     validate_consolidation, validate_goals_and_merges,
 )
+from sleep.dreamer import Dreamer
+from sleep.insight_validator import validate_dreams as run_dream_tests
 from sleep.memory import Edit, MemoryStore
 from sleep.replay import run_replays
 from sleep.scheduler import choose_mode
@@ -97,6 +108,22 @@ DEFAULTS: dict[str, Any] = {
     # schema store (REM only)
     "schema": False, "schema_min_strength": 0.6, "schema_min_items": 3, "max_schemas": 4,
     "schema_max_tokens": 2048, "schema_path": None, "schema_persist": False,
+    # REM dreaming (sleep/dreamer.py + sleep/insight_validator.py), REM mode only: the dreamer
+    # recombines memory items + steps into hypotheses; each stays a hypothesis until a paired
+    # A/B sandbox test confirms it (validated -> verified, refuted -> refuted, else tentative).
+    "dream": False,                  # off by default: every existing arm keeps its semantics
+    "dream_max": 3,                  # dream hypotheses per REM pass
+    "dream_k_sources": 6,            # memory items sampled per dream call (seeded, exploration mix)
+    "dream_max_tokens": 4096, "dream_retries": 1,
+    "dream_seed": None,              # None -> deterministic from the sleep step
+    "dream_min_strength": 0.0,       # memory items below this strength are not dream sources
+    "dream_validate": True, "dream_evals": 2,   # A/B tests per REM pass (<= 2 eval calls each)
+    "dream_margin": None,            # None -> replay_margin
+    "dream_min_budget_tokens": 8192, # skip dreaming when less than this much budget remains
+    # cross-run memory (MemoryStore.save_state/from_state): a JSON file the store loads from at
+    # construction and writes back after every consolidate, so discoveries persist across runs
+    # and problems. Shared files are last-write-wins: do not point parallel runs at one file.
+    "memory_path": None,
     # gating: fatigue (the loop's FatigueMonitor level) | pressure | fixed | schedule
     "gating": "fatigue",
     "sleep_steps": None,            # schedule gating: explicit steps after which to sleep
@@ -116,7 +143,9 @@ DEFAULTS: dict[str, Any] = {
 GATINGS = ("fatigue", "pressure", "fixed", "schedule")
 TIMED_DEPTHS = ("scheduler", "nrem", "fatigue")
 SUM_METRICS = ("items_added", "items_evicted", "replays_wasted", "replays_run", "claims", "edits_applied",
-               "edits_rejected", "replay_evaluations", "replays_beat_run_best", "consolidator_calls")
+               "edits_rejected", "replay_evaluations", "replays_beat_run_best", "consolidator_calls",
+               "dream_calls", "dream_evaluations", "dreams_validated", "dreams_refuted",
+               "dreams_uncertain", "dreams_untested")
 
 METRIC_FIELDS = ("pressure", "sleep_mode", "block_tokens", "items_added", "items_evicted", "replays_wasted")
 
@@ -159,6 +188,16 @@ class FullSleep:
             max_chars=self.p["max_item_chars"], path=self.p["schema_path"], persist=self.p["schema_persist"],
         ) if self.p["schema"] else None
         self.evaluator = None
+        p = self.p
+        self.dreamer = Dreamer(k_sources=p["dream_k_sources"], max_dreams=p["dream_max"],
+                               dream_max_tokens=p["dream_max_tokens"], retries=p["dream_retries"],
+                               seed=p["dream_seed"] or 0, min_strength=p["dream_min_strength"])
+        if p["memory_path"]:
+            try:
+                self.store = MemoryStore.from_state(
+                    json.loads(Path(p["memory_path"]).read_text(encoding="utf-8")))
+            except FileNotFoundError:
+                pass  # first run sharing this path starts empty
         self.last_metrics: dict = {}
         self._last_sleep_step = -1
         self._seen: list[dict] = []  # slim copies of observed step records (for pressure)
@@ -473,7 +512,10 @@ class FullSleep:
         evicted = self.store.evict(min_strength=p["min_strength"], max_items=p["max_items"]) if p["eviction"] else []
         if self.schemas is not None and mode == "rem":
             m.update(self.schemas.update(task, self.store, llm, step=step))
+        if p["dream"] and mode == "rem":
+            m.update(self._dream(task, records, llm, budget, step=step))
 
+        self._persist_memory()
         self._last_sleep_step = step
         m["items_added"] = len(set(self.store.items) - before) + sum(1 for i in evicted if i not in before)
         m["items_evicted"] = len(evicted)
@@ -482,6 +524,46 @@ class FullSleep:
         m["block_tokens"] = count_tokens(self.memory_section(self.max_block_tokens))
         self.last_metrics = m
         return m
+
+    def _dream(self, task: str, records: list[dict], llm, budget, *, step: int) -> dict:
+        """The REM dream pass: recombine memory into hypotheses, then validate them in the sandbox.
+
+        Budget-aware (adaptive sleeping): below `dream_min_budget_tokens` remaining the pass is
+        skipped entirely; `dream_evals` caps sandbox tests so dreams can never eat the run's
+        evaluation budget unchecked (they share the run's EvalBudget through the bound evaluator).
+        """
+        p = self.p
+        remaining = getattr(budget, "remaining", None)
+        if remaining is not None and remaining < p["dream_min_budget_tokens"]:
+            return {"dream_skipped": "low_budget", "dream_remaining_tokens": remaining,
+                    "dream_calls": 0, "dream_evaluations": 0}
+        dm = self.dreamer.dream(task, self.store, records, llm, step=step)
+        m: dict = {"dream_calls": dm.get("dream_calls", 0),
+                   "dream_parse_error": dm.get("dream_parse_error"),
+                   "dream_source_ids": dm.get("dream_source_ids"), "dream_evaluations": 0}
+        dreams = dm.get("dreams") or []
+        if not dreams:
+            m["dreams"] = []
+            return m
+        # dream_validate=False still writes records: every dream lands as an untested, tentative item
+        rep = run_dream_tests(dreams, self.store, self.evaluator, step=step,
+                              max_tests=p["dream_evals"] if p["dream_validate"] else 0,
+                              margin=p["dream_margin"] if p["dream_margin"] is not None else p["replay_margin"],
+                              rel_tol=p["replay_rel_tol"])
+        m["dreams"] = rep["records"]
+        m["dream_evaluations"] = rep["evaluations"]
+        for k in ("validated", "refuted", "uncertain", "untested"):
+            m[f"dreams_{k}"] = rep[k]
+        return m
+
+    def _persist_memory(self) -> None:
+        """Write the store to `memory_path` (cross-run memory; see DEFAULTS)."""
+        path = self.p["memory_path"]
+        if not path:
+            return
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.store.save_state()), encoding="utf-8")
 
     def _refresh_goal(self, best_rec: dict | None, step: int) -> None:
         if best_rec:

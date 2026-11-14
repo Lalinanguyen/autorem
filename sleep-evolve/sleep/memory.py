@@ -421,6 +421,40 @@ class MemoryStore:
             for i in self.ordered()
         ]
 
+    # ---- cross-run persistence ------------------------------------------------------
+    def save_state(self) -> dict:
+        """Full store state as JSON-able data: every item plus the id counters, so a later run
+        (or a different problem) resumes with the same ids it would have issued next."""
+        return {
+            "items": [it.to_dict() for it in self.ordered()],
+            "_next": self._next, "_next_goal": self._next_goal,
+            "initial_strength": self.initial_strength, "verified_strength": self.verified_strength,
+            "support_gain": self.support_gain, "contradict_loss": self.contradict_loss,
+            "max_item_chars": self.max_item_chars,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "MemoryStore":
+        """Rebuild a store from save_state(). Missing files should be handled by the caller (start
+        an empty store); a corrupt dict raises."""
+        store = cls(
+            initial_strength=state.get("initial_strength", 0.3),
+            verified_strength=state.get("verified_strength", 0.7),
+            support_gain=state.get("support_gain", 0.15),
+            contradict_loss=state.get("contradict_loss", 0.25),
+            max_item_chars=state.get("max_item_chars", 300),
+        )
+        for d in state.get("items") or []:
+            it = MemoryItem(**{k: d[k] for k in MemoryItem.__dataclass_fields__ if k in d})
+            store.items[it.id] = it
+        if "_next" in state:
+            store._next = int(state["_next"])
+        else:  # defensive: derive from the highest m-id + 1
+            store._next = 1 + max((_id_key(i)[1] for i in store.items if i.startswith("m")), default=0)
+        if "_next_goal" in state:
+            store._next_goal = int(state["_next_goal"])
+        return store
+
 
 def _clip(x: float) -> float:
     return max(0.0, min(1.0, float(x)))

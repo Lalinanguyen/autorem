@@ -24,6 +24,13 @@ Arms (ARM_SPECS):
   sleep_lite      SleepLite (optional): drowsy-tier forgetting only, zero sleep LLM calls
   fixed_tiered    (variant, not in the default list) gating=fixed, every_n=5, timed_depth=fatigue
 Arms 2-5 run NREM only (timed_depth=nrem: no REM, no forget tier, scheduler not used for depth).
+  summarize       Summarize policy every_n=5: plain notes, no structured memory (dream-ladder arm 3)
+  dream_unvalidated  FullSleep gating=fatigue + REM dreaming; dream hypotheses enter memory as
+                  tentative items but are NEVER sandbox-tested (arm 4: does validation matter?)
+  dream           FullSleep gating=fatigue + REM dreaming + A/B dream validation (arm 5)
+  dream_distill   `dream` plus an optional memory_path: the store persists across runs/problems so
+                  validated discoveries accumulate for the offline distillation pipeline (arm 6;
+                  actual LoRA training happens outside runs via sleep/trainer.py + infra/modal_train.py)
 
 "Sleep count" for matching = LLM sleeps (depth nrem or nrem_rem) in the fatigue arm's log; its
 code-only forgets are not counted (they are reported separately in the metrics).
@@ -102,6 +109,17 @@ ARM_SPECS: dict[str, ArmSpec] = {s.name: s for s in (
           role="drowsy-tier forgetting only (zero sleep LLM calls)"),
     _spec("fixed_tiered", "full_sleep", {"gating": "fixed", "every_n": 5, "timed_depth": "fatigue"},
           role="variant: fixed timing, depth from fatigue level"),
+    # Dreaming arms (eval ladder arm 3-5; arm 6 = dream + persisted memory, distillation is offline)
+    _spec("summarize", "summarize", {"every_n": 5}, role="NREM-by-time summarization (plain notes arm)"),
+    _spec("dream_unvalidated", "full_sleep",
+          {"gating": "fatigue", "dream": True, "dream_validate": False},
+          role="NREM + REM associative dreaming; hypotheses land tentative, never sandbox-tested"),
+    _spec("dream", "full_sleep", {"gating": "fatigue", "dream": True, "dream_validate": True},
+          role="NREM + REM dreaming + A/B dream validation"),
+    _spec("dream_distill", "full_sleep",
+          {"gating": "fatigue", "dream": True, "dream_validate": True},
+          extra=("memory_path",), role="dream + validation; memory persists across "
+          "runs via memory_path so validated discoveries accumulate for offline distillation"),
 )}
 
 DEFAULT_ARMS = ("no_sleep", "fixed_letta", "fixed_sparse", "fixed_matched", "random_matched", "fatigue",

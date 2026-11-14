@@ -49,7 +49,12 @@ Each run writes `runs/<run_id>/history.jsonl`, `summary.json` and `best_program.
 | `harness/program_db.py` | all programs; parent = best w.p. 0.7, else uniform over the top 10 |
 | `harness/loop.py` | the evolution loop |
 | `harness/config.py` | `RunConfig` (YAML) |
-| `sleep/` | `SleepPolicy` protocol; `NoSleep`, `Summarize`; `FullSleep` (stubs) |
+| `sleep/` | `SleepPolicy` protocol; `NoSleep`, `Summarize`, `SleepLite`, `FullSleep` |
+| `sleep/memory.py` | `MemoryStore`: typed items (goal/rule/fact/skill/dead_end), statuses, decay/evict/merge, `save_state`/`from_state` cross-run persistence |
+| `sleep/replay.py` | paired A/B replay: control vs treatment through the sandbox, difference decides the claim |
+| `sleep/dreamer.py`, `sleep/dream_io.py`, `sleep/insight_validator.py` | REM dreaming: seeded recombination of memory into hypotheses; each is validated by an A/B sandbox test before it can become verified (see below) |
+| `sleep/trainer.py`, `infra/modal_train.py` | parametric learning: collect training examples from validated discoveries, LoRA spec, Modal GPU job, checkpoint registry with promote-only-if-better |
+| `harness/evals.py` | `EvalBudget` + `CountingEvaluator`: every evaluator call (steps, replays, dream tests) counted by role; optional shared `max_evaluations` |
 | `infra/modal_eval.py` | evaluators on Modal CPU; `ModalEvaluator` |
 | `infra/modal_vllm.py` | vLLM OpenAI-compatible server on Modal (model from `serve:` in config) |
 | `scripts/run_one.py`, `scripts/run_matrix.py` | single run; problems × policies × seeds fan-out |
@@ -78,5 +83,31 @@ Each run writes `runs/<run_id>/history.jsonl`, `summary.json` and `best_program.
 - **p36** uses the notebook's verification logic with a 1e-9 tolerance on containment and overlap.
   `best_known = 2.6359830849176067` is the sum of AlphaEvolve's n=26 construction
   (`tests/data/p36_alphaevolve_n26.json`, copied from the notebook).
+
 - **Model name.** The harness calls `LLM_MODEL`. The config's `model` is recorded in the summary,
   with a warning if it differs. `serve.model` is what `infra/modal_vllm.py` deploys.
+
+## REM dreaming and parametric learning
+
+FullSleep's REM pass (plateau / exhausted fatigue tier) can dream: `sleep/dreamer.py` samples
+memory items with a seeded explore/exploit mix and asks the sleep model to recombine them into
+**hypotheses** — associations, counterfactuals, extrapolations — each citing its source ids.
+A dream is never trusted: `sleep/insight_validator.py` turns each testable hypothesis into the
+same paired A/B sandbox test the consolidator uses. Confirmed -> added as a `verified` skill
+(source `dream`, evidence `d<step>.<i>`); refuted -> stored refuted; uncertain or untestable ->
+`tentative` at best. Validation evals are charged to the run's shared `EvalBudget` under the
+sleep role, capped per pass by `dream_evals`, and dreaming is skipped below
+`dream_min_budget_tokens` remaining budget.
+
+Ladder arms (`harness/baselines.py`): `summarize`, `dream_unvalidated` (dreams enter memory
+untested), `dream` (validation on), `dream_distill` (dream + `memory_path`: the store persists
+across runs/problems so validated discoveries accumulate). Example matrix:
+`configs/dream_openai.yaml`.
+
+Level-2 (weights): `sleep/trainer.py` turns verified items and best programs into SFT examples
+and builds a training spec; `infra/modal_train.py` runs the actual LoRA job on Modal GPU
+(`uv run modal run infra/modal_train.py --spec-path spec.json`, adapter ->
+`sleep-evolve-adapters` volume); `CheckpointRegistry` promotes an adapter only on a measured
+improvement and keeps rollback history. Inference APIs never change weights — the only weight
+update path is this pipeline, and serving a promoted adapter needs vLLM's `--enable-lora`
+wiring (a documented follow-up).
