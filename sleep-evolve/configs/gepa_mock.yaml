@@ -1,0 +1,16 @@
+# Offline GEPA dry run on problem 36 (use --mock-llm): fake upstream at 100 tokens per call.
+#   uv run python -m arms.run --config configs/gepa_mock.yaml --mock-llm
+#   uv run python -m arms.run --config configs/gepa_mock.yaml --mock-llm --arm gepa_sleep
+problem_id: 36
+seed: 0
+total_token_budget: 3000
+max_steps: 12
+arm: gepa
+gepa:
+  round_metric_calls: 4
+sleep_policies:
+  full_sleep:
+    max_block_tokens: 256
+    replay: false
+eval_timeout_s: 30
+out_dir: runs

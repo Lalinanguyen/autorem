@@ -1,0 +1,43 @@
+# GEPA arms on problem 36, matched to configs/example.yaml (same token budget, same step count).
+#   uv sync --group gepa
+#   uv run python -m arms.run --config configs/gepa.yaml                  # GEPA
+#   uv run python -m arms.run --config configs/gepa.yaml --arm gepa_sleep # GEPA + FullSleep
+problem_id: 36
+seed: 0
+total_token_budget: 2000000    # agent (GEPA reflection, via the proxy) + sleep tokens, one total
+max_steps: 500                 # = max_metric_calls: sandbox evals after the seed (step 0)
+max_completion_tokens: 8192    # cap per GEPA reflection call (clamped to the remaining budget)
+
+arm: gepa                      # gepa | gepa_sleep
+gepa:
+  max_metric_calls: null       # null = max_steps (matched to the loop arms)
+  reflection_max_tokens: null  # null = max_completion_tokens
+  temperature: null
+  candidate_selection_strategy: pareto   # pareto | current_best | epsilon_greedy | top_k_pareto
+  invalid_score: -1.0e9        # finite score GEPA sees for invalid programs (logged as null)
+  max_llm_failures: 5          # stop after N non-budget LLM errors in a row
+  # gepa_sleep only:
+  round_metric_calls: 10       # k sandbox evals per GEPA round; FullSleep runs between rounds
+  memory_token_cap: null       # null = full_sleep.max_block_tokens
+  sleep_policy: full_sleep     # which sleep_policies entry configures FullSleep
+
+sleep_policies:
+  full_sleep:                  # same params as configs/example.yaml; gating params are unused here
+    max_block_tokens: 2048     # (GEPA+sleep always sleeps between rounds)
+    decay: true
+    decay_factor: 0.9
+    eviction: true
+    min_strength: 0.05
+    max_items: 40
+    scheduler: true
+    plateau_window: 15
+    late_budget_fraction: 0.8
+    replay: true
+    replay_budget: 2
+    rem_replay_budget: 1
+    schema: false
+
+eval_backend: local
+eval_timeout_s: 60
+model: Qwen/Qwen3-8B           # expected LLM_MODEL (warning on mismatch)
+out_dir: runs

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+*.bak
+.claude/settings.local.json
+.claude/worktrees/

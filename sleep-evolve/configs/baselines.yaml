@@ -1,0 +1,139 @@
+# Baseline comparison suite (harness/baselines.py) on problem 36 against LLM_BASE_URL / LLM_MODEL.
+# Q1: sleep vs no sleep. Q2: fatigue-triggered vs fixed-schedule sleep. Arms differ ONLY in the trigger.
+#   uv run modal run scripts/run_matrix.py --config configs/baselines.yaml --problems 36 --seeds 0,1,2,3,4
+#   uv run python -m analysis.compare_baselines --runs runs_modal --out baselines_report
+problem_id: 36
+seed: 0
+total_token_budget: 2000000    # agent + sleep tokens, one shared total, same in every arm
+max_steps: 100000              # budget, not steps, ends every arm
+k_recent: 5
+max_completion_tokens: 8192
+context_cap_tokens: 8000       # the SAME wake-context cap in every arm (no_sleep fills it with raw steps)
+awake_tags: true               # required in every arm
+
+sleep_policy: full_sleep       # the base runs as the fatigue arm if used directly with run_one
+sleep_policies:
+  full_sleep:                  # SHARED sleep settings: identical in every sleeping arm. Arms only change
+                               # their declared trigger params (harness/baselines.py ARM_SPECS).
+    every_n: 10                # (trigger; fixed arms declare their own)
+    max_block_tokens: 2048
+    context_cap_tokens: null   # must stay null: the context cap is the run-level one, same for no_sleep
+    awake_tags: true
+    decay: true
+    decay_factor: 0.9
+    eviction: true
+    min_strength: 0.05
+    max_items: 40
+    pressure: true             # pressure is computed and logged only (no arm gates on it)
+    pressure_threshold: 0.5
+    min_gap: 5
+    max_gap: 25
+    scheduler: true            # unused for depth: fatigue picks tiers, fixed arms force nrem
+    plateau_window: 15
+    late_budget_fraction: 0.8
+    replay: true
+    replay_budget: 2
+    rem_replay_budget: 1
+    schema: false
+    schema_persist: false
+    gating: fatigue            # (trigger; declared per arm)
+    timed_depth: nrem          # (trigger depth; declared per arm)
+    max_depth: nrem_rem
+    respond_drowsy: true
+    forget_min_gap: 3
+    forget_error_chars: 80
+    forget_dead_end_gain: 0.1
+    min_sleep_budget_tokens: 8192
+    defer_fallback_forget: true
+    wake_recent_steps: 2
+    wake_min_strength: 0.1
+
+baselines:
+  arms: [fatigue, no_sleep, fixed_letta, fixed_sparse, fixed_matched, random_matched, sleep_lite]
+  arm_params:                  # values for DECLARED params only (anything else fails the drift check)
+    fixed_letta: {every_n: 5}
+    fixed_sparse: {every_n: 20}
+    fixed_tiered: {every_n: 5}   # variant; add fixed_tiered to `arms` to run it
+  overrides: {}                # per-arm RunConfig overrides: any entry fails the drift check
+  matching:
+    min_gap: null              # min steps between matched sleeps; null = fatigue.grace_steps + 1
+    seed_salt: random_matched  # random_matched schedule seed = salt|p<problem>|s<seed>
+
+metrics:                       # summary.json["metrics"] (harness/metrics.py)
+  checkpoints: [0.1, 0.25, 0.5, 0.75, 1.0]
+  thresholds: [0.95, 0.99]
+  window: 5                    # agent steps before / after each sleep for behavior rates
+
+eval_backend: local
+eval_timeout_s: 60
+model: Qwen/Qwen3-8B
+serve:
+  model: Qwen/Qwen3-8B
+  gpu: "H100:1"
+  vllm_version: "0.32.0"
+  max_model_len: 32768
+out_dir: runs
+
+# Fatigue monitor (harness/fatigue.py). Measured and logged for EVERY arm (no_sleep included);
+# policies only read the level. Every threshold, weight, window, cap and grace length is here.
+fatigue:
+  enabled: true
+  skip_seed_step: true          # step 0 (seed, no LLM call) is not an agent step
+  round_digits: 6
+  # load (homeostatic pressure): agent tokens since the last sleep
+  load_tokens_scale: 300000   # tokens that give load 1.0 (linear)
+  load_budget_fraction: null    # or: scale = fraction * total_token_budget
+  load_curve: linear            # linear | saturating (1 - exp(-t/scale))
+  load_cap: 1.0
+  load_relief: {forget: 0.2, nrem: 0.6, nrem_rem: 0.9}   # fraction of load removed per depth
+  # rested baseline (re-measured after every sleep) and rolling window, in agent steps
+  baseline_steps: 5
+  window: 5
+  forget_resets_baseline: false
+  improvement_min_delta: 0.0
+  # impairment components (each normalized to [0, 1])
+  calibration_floor: 0.01       # min baseline |expected - score| gap
+  calibration_ratio_cap: 4.0    # gap ratio vs baseline that maps to 1.0
+  calibration_invalid_gap: null # gap charged to an invalid step with a prediction; null = skip
+  calibration_score_scale: null # null = |best_known|
+  calibration_min_samples: 2
+  perseveration_match: 0.5      # |tags & failed tags| / |failed tags|
+  perseveration_failure: no_improvement   # invalid | no_improvement
+  perseveration_lookback: null
+  stagnation_steps_norm: 20
+  stagnant_threshold: 0.75      # tired + stagnation >= this -> NREM+REM
+  sloppiness_floor: 0.05
+  sloppiness_ratio_cap: 4.0
+  parse_failure_patterns: ["code block"]
+  timeout_patterns: ["timeout", "timed out"]
+  header_expected: auto         # missing awake header = parse failure: auto | always | never
+  narrowing_tag_weight: 0.5
+  narrowing_similarity_weight: 0.5
+  narrowing_min_samples: 2
+  similarity_token_regex: '\w+'
+  context_soft_cap: 8000
+  bloat_cap: 1.0
+  # mix: fatigue = load_weight * load + impairment_weight * impairment + debt
+  impairment_weights: {calibration: 0.35, perseveration: 0.15, stagnation: 0.15, sloppiness: 0.15, narrowing: 0.1, bloat: 0.1}
+  renormalize_missing: true
+  load_weight: 0.4
+  impairment_weight: 0.6
+  # levels
+  drowsy_threshold: 0.3
+  tired_threshold: 0.5
+  exhausted_threshold: 0.75
+  hysteresis_margin: 0.05
+  wake_threshold: 0.25          # after a sleep, fatigue must drop below this to reach tired again
+  rearm_max_steps: 20
+  grace_steps: 3                # always rested for this many steps after waking
+  # sleep debt (deferred sleeps)
+  debt_increment: 0.1
+  debt_cap: 0.5
+  debt_relief: {forget: 0.0, nrem: 0.5, nrem_rem: 1.0}
+  debt_deepen_threshold: 1.0e-09
+  offline_default_depth: nrem   # depth assumed for sleeps of policies that do not report one
+  validation:                   # analysis/fatigue_check.py
+    horizon_k: 5
+    auc_margin: 0.05
+    arm: no_sleep
+    min_samples: 10
