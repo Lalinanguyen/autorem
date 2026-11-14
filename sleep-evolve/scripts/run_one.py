@@ -17,7 +17,7 @@ from evaluators import make_evaluator  # noqa: E402
 from harness.budget import Budget  # noqa: E402
 from harness.config import RunConfig, load_config, load_dotenv  # noqa: E402
 from harness.loop import run  # noqa: E402
-from llm.client import LLMClient  # noqa: E402
+from llm.client import BillingError, LLMClient  # noqa: E402
 from sleep import make_policy  # noqa: E402
 
 
@@ -28,7 +28,7 @@ def execute(cfg: RunConfig, *, mock_llm: bool = False, out_dir: str | None = Non
 
         llm = LLMClient(budget, MockTransport(seed=cfg.seed))
     else:
-        llm = LLMClient.from_env(budget)
+        llm = LLMClient.from_env(budget, cfg.llm)
 
     eval_kwargs = {"timeout_s": cfg.eval_timeout_s} if cfg.eval_timeout_s else {}
     evaluator = make_evaluator(cfg.problem_id, **eval_kwargs)
@@ -61,7 +61,11 @@ def main() -> None:
         args.config, problem_id=args.problem_id, sleep_policy=args.sleep_policy,
         seed=args.seed, run_id=args.run_id,
     )
-    summary = execute(cfg, mock_llm=args.mock_llm, out_dir=args.out_dir)
+    try:
+        summary = execute(cfg, mock_llm=args.mock_llm, out_dir=args.out_dir)
+    except BillingError as e:  # outputs were written (stop_reason "billing_error"); never retried
+        print(f"STOPPED: {e}", file=sys.stderr)
+        raise SystemExit(2)
     print(json.dumps({k: v for k, v in summary.items() if k != "config"}, indent=2))
 
 

@@ -1,4 +1,5 @@
-"""Consolidator prompt (PRIORITIZE / EXTRACT CLAIMS / PLAN REPLAYS), robust JSON parsing, history view.
+"""Consolidator prompt (PRIORITIZE / EXTRACT CLAIMS / PLAN PAIRED REPLAYS / GOALS / MERGES),
+robust JSON parsing, history view.
 
 The history view tolerates records that lack awake fields (approach_tags, expected_score,
 rationale, surprise, perseveration_hit): GEPA and other loops pass JSONL history they wrote
@@ -54,10 +55,32 @@ From the selected steps, write candidate claims: causal, reusable statements, no
   bad:  "Step 41 tried hex init and it went up"
 Also list existing memory items that the new evidence bears on (supports or contradicts).
 
-STEP 3 · PLAN REPLAYS
-For up to $replay_budget claims that are both decision-relevant and unverified, write the
-SMALLEST program that would confirm or refute the claim with the evaluator. Every replay must
-name the memory edit it will decide. Don't propose replays whose outcome wouldn't change memory.
+STEP 3 · PLAN REPLAYS (paired A/B tests)
+For up to $replay_budget claims that are both decision-relevant and unverified, write a PAIRED
+test: two small programs that each define construct().
+  control:   a simple, deterministic baseline program WITHOUT the claimed change
+  treatment: the control with ONLY the claimed change applied
+"Differs only by the claimed change" means: same structure, same parameters, same random seeds,
+same iteration counts, same everything else; the line(s) implementing the change are the only
+difference. Fix every random seed. Identical programs are discarded unscored.
+Only the difference is judged, so the programs need not be competitive with the best score:
+  rule / fact / skill: confirmed if treatment beats control by more than $margin_note
+  dead_end (the treatment applies the dead-end idea): confirmed if treatment does not beat control
+  an invalid treatment with a valid control confirms a dead end and refutes other claims
+  a crash in either program, or an invalid control, decides nothing (wasted)
+Every replay must name the memory edit it will decide. Don't propose replays whose outcome
+wouldn't change memory.
+
+STEP 4 · GOALS
+Write 1-$max_goals goals, one sentence each: the current strategy and the next experiments. The
+agent sees goals first, right after the best-score line (g0: maintained automatically, never
+replace it). Goals never decay. Each goal either replaces a stale goal (its id in "replaces") or
+is new ("replaces": null); at most $max_goals are kept, and a new goal pushes out the oldest.
+
+STEP 5 · MERGE NEAR-DUPLICATES
+If two or more memory items say the same thing in different words, merge them: list their ids
+and write one combined statement. The merged item keeps the union of their evidence and tags and
+the strongest status. Never merge a goal with a non-goal, or a dead end with a non-dead end.
 
 Output JSON only:
 {
@@ -65,14 +88,19 @@ Output JSON only:
   "claims": [{"cid": "c1", "kind": "rule|fact|skill|dead_end", "text": "...",
               "evidence": [step ids], "approach_tags": [...],
               "relates_to": [memory ids], "relation": "new|supports|contradicts"}],
-  "replays": [{"cid": "c1", "program": "...python defining construct()...",
-               "confirms_if": "...", "refutes_if": "...",
-               "decides": "add c1 as verified | refute m7 | ..."}]
+  "replays": [{"cid": "c1", "change": "one line: what the treatment changes",
+               "control": "...python defining construct()...",
+               "treatment": "...the control with only the change applied...",
+               "decides": "add c1 as verified | refute m7 | ..."}],
+  "goals": [{"text": "one sentence", "replaces": "g2" or null}],
+  "merges": [{"ids": ["m3", "m7"], "text": "one combined statement"}]
 }""")
 
 REM_NOTE = ("<mode>REM: the search has plateaued. Prefer claims that generalize across many steps or "
             "point to untried directions; replays are scarce this sleep.</mode>\n")
 NREM_NOTE = "<mode>NREM: stabilize and verify what the recent steps showed.</mode>\n"
+RETRY_NOTE = ("Your reply contained no valid JSON object. Reply again with the JSON object only, "
+              "exactly in the requested format, with no other text.")
 
 
 def parse_json_object(text: str) -> tuple[dict | None, str | None]:
@@ -156,7 +184,56 @@ def validate_consolidation(obj: dict | None, *, max_claims: int, max_chars: int 
         problems.append("replays is not a list")
         replays = []
     replays = [r for r in replays if isinstance(r, dict)]
+    for i, r in enumerate(replays):
+        if "program" in r and "control" not in r and "treatment" not in r:
+            problems.append(f"replay {i} ({r.get('cid')}) uses the old single-program shape; "
+                            "needs control + treatment")
     return claims, replays, problems
+
+
+def validate_goals_and_merges(obj: dict | None, *, max_goals: int = 3,
+                              max_chars: int = 300) -> tuple[list[dict], list[dict], list[str]]:
+    """Return (goals, merges, problems) from the consolidator object. Never raises.
+
+    goals:  [{"text": str, "replaces": str | None}] (at most max_goals; a bare string is a new goal)
+    merges: [{"ids": [str, ...] (>= 2 distinct), "text": str | None}]
+    Missing keys are fine (older outputs had neither).
+    """
+    problems: list[str] = []
+    if not isinstance(obj, dict):
+        return [], [], []
+    goals: list[dict] = []
+    raw = obj.get("goals", [])
+    if not isinstance(raw, list):
+        problems.append("goals is not a list")
+        raw = []
+    for i, g in enumerate(raw):
+        if isinstance(g, str):
+            g = {"text": g}
+        if not isinstance(g, dict) or not isinstance(g.get("text"), str) or not g["text"].strip():
+            problems.append(f"goal {i} has no text")
+            continue
+        rep = g.get("replaces")
+        goals.append({"text": " ".join(g["text"].split())[:max_chars],
+                      "replaces": str(rep) if isinstance(rep, (str, int)) and str(rep).strip() else None})
+    if len(goals) > max_goals:
+        problems.append(f"{len(goals)} goals given; kept the first {max_goals}")
+        goals = goals[:max_goals]
+    merges: list[dict] = []
+    raw = obj.get("merges", [])
+    if not isinstance(raw, list):
+        problems.append("merges is not a list")
+        raw = []
+    for i, mg in enumerate(raw):
+        ids = mg.get("ids") if isinstance(mg, dict) else None
+        ids = list(dict.fromkeys(str(x) for x in ids if isinstance(x, (str, int)))) if isinstance(ids, list) else []
+        if len(ids) < 2:
+            problems.append(f"merge {i} needs at least two ids")
+            continue
+        text = mg.get("text")
+        merges.append({"ids": ids, "text": " ".join(text.split())[:max_chars]
+                       if isinstance(text, str) and text.strip() else None})
+    return goals, merges, problems
 
 
 def diff_summary(parent_code: str | None, code: str | None, max_lines: int = 10, max_chars: int = 300) -> str:

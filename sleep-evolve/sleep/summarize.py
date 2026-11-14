@@ -15,12 +15,16 @@ SYSTEM = (
 class Summarize:
     name = "summarize"
 
-    def __init__(self, every_n: int = 10, max_block_tokens: int = 1024, include_best_program: bool = True):
+    def __init__(self, every_n: int = 10, max_block_tokens: int = 1024, include_best_program: bool = True,
+                 sleep_max_tokens: int = 4096):
         if every_n <= 0:
             raise ValueError("every_n must be positive")
         self.every_n = every_n
         self.max_block_tokens = max_block_tokens
         self.include_best_program = include_best_program
+        # completion cap for the sleep call; separate from the notes budget because reasoning
+        # models also spend completion tokens on reasoning (gpt-5 at low effort would starve at 1024)
+        self.sleep_max_tokens = sleep_max_tokens
 
     def should_sleep(self, step: int, history: list[dict]) -> bool:
         return step > 0 and step % self.every_n == 0
@@ -42,5 +46,5 @@ class Summarize:
                 )
         parts.append("Write the updated notes. Output only the notes.")
         messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": "\n\n".join(parts)}]
-        resp = llm.complete(messages, role="sleep", max_tokens=self.max_block_tokens)
+        resp = llm.complete(messages, role="sleep", max_tokens=self.sleep_max_tokens)
         return resp.text.strip()

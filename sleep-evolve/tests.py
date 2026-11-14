@@ -559,7 +559,8 @@ def test_proxy_charges_exactly_the_upstream_usage_to_the_run(proxy_stack):
     assert budget.agent_tokens == sum(p + c for p, c in usages)
     assert budget.agent_calls == 5 and budget.sleep_tokens == 0
     assert (lm.total_tokens_in, lm.total_tokens_out) == (sum(p for p, _ in usages), sum(c for _, c in usages))
-    assert proxy.usage_log("run-a") == [{"role": "agent", "prompt_tokens": p, "completion_tokens": c} for p, c in usages]
+    assert proxy.usage_log("run-a") == [{"role": "agent", "prompt_tokens": p, "completion_tokens": c,
+                                         "cached_tokens": None, "reasoning_tokens": None} for p, c in usages]
     # forwarded with the configured key and model, not the client's
     assert up.headers[0]["Authorization"] == "Bearer sk-test"
     assert all(r["model"] == "served-model" for r in up.requests)
@@ -692,6 +693,269 @@ def test_proxy_register_requires_a_budget_and_rejects_rebinding(proxy_stack):
     proxy.register("r", Budget(10))
     with pytest.raises(ValueError):
         proxy.register("r", Budget(10))
+
+
+# ---- OpenAI reasoning-model parameters, usage breakdown, billing errors, cost --------------------
+
+from harness.cost import DEFAULT_PRICES, ModelPrice, cost_block, lookup_price, price_table  # noqa: E402
+from harness.cost import usage_cost  # noqa: E402
+from harness.logging import USAGE_FIELDS  # noqa: E402
+from llm.chat_params import (  # noqa: E402
+    BillingError, billing_error_from_body, is_reasoning_model, parse_usage, resolve_chat_params,
+)
+
+
+@pytest.mark.parametrize("model, reasoning", [
+    ("gpt-5-mini", True), ("gpt-5-nano", True), ("gpt-5", True), ("gpt-5-mini-2025-08-07", True),
+    ("gpt-5.4-nano", True), ("gpt-6.1-terra", True), ("o1", True), ("o3-mini", True), ("o4-mini", True),
+    ("openai/gpt-5-mini", True), ("gpt-5-chat-latest", False), ("Qwen/Qwen3-8B", False), ("gpt-4o", False),
+    ("gpt-4.1-mini", False), ("ollama-model", False), (None, False), ("mock-model", False),
+])
+def test_reasoning_models_are_detected_by_name(model, reasoning):
+    assert is_reasoning_model(model) is reasoning
+    p = resolve_chat_params(model, env={})
+    assert p.token_param == ("max_completion_tokens" if reasoning else "max_tokens")
+    assert p.request_kwargs(100) == {p.token_param: 100}  # nothing else unless configured
+
+
+def test_param_selection_reasoning_vs_non_reasoning_and_precedence():
+    r = resolve_chat_params("gpt-5-mini", {"reasoning_effort": "low", "temperature": 0.2}, env={}, warn=False)
+    assert r.request_kwargs(64) == {"max_completion_tokens": 64, "reasoning_effort": "low"}
+    assert r.dropped == ("temperature",) and r.sources["reasoning_effort"] == "config"
+    # temperature is allowed on a reasoning model only with reasoning_effort "none"
+    n = resolve_chat_params("gpt-5.4-mini", {"reasoning_effort": "none", "temperature": 0.2}, env={}, warn=False)
+    assert n.request_kwargs(8) == {"max_completion_tokens": 8, "reasoning_effort": "none", "temperature": 0.2}
+    # vLLM / Qwen keeps today's request (max_tokens only); a stray effort is not sent
+    q = resolve_chat_params("Qwen/Qwen3-8B", {"reasoning_effort": "low", "temperature": 0.7}, env={}, warn=False)
+    assert q.request_kwargs(32) == {"max_tokens": 32, "temperature": 0.7} and q.dropped == ("reasoning_effort",)
+    # config > env > auto; explicit overrides of the auto choice
+    env = {"LLM_REASONING_EFFORT": "high", "LLM_TOKEN_PARAM": "max_tokens"}
+    e = resolve_chat_params("gpt-5-mini", None, env=env)
+    assert e.reasoning_effort == "high" and e.token_param == "max_tokens" and e.sources["token_param"] == "env"
+    c = resolve_chat_params("gpt-5-mini", {"reasoning_effort": "medium"}, env=env)
+    assert c.reasoning_effort == "medium" and c.sources["reasoning_effort"] == "config"
+    forced = resolve_chat_params("my-local-reasoner", {"reasoning_model": True}, env={})
+    assert forced.token_param == "max_completion_tokens"
+    assert resolve_chat_params("Qwen/Qwen3-8B", {"token_param": "max_completion_tokens"}, env={}).token_param == \
+        "max_completion_tokens"
+    with pytest.raises(ValueError):
+        resolve_chat_params("gpt-5-mini", {"reasoning_effort": "extreme"}, env={})
+    with pytest.raises(ValueError):
+        resolve_chat_params("gpt-5-mini", None, env={"LLM_TOKEN_PARAM": "max_output_tokens"})
+    with pytest.raises(ValidationError):  # the config schema rejects bad values too
+        RunConfig(problem_id=0, total_token_budget=10, max_steps=1, llm={"reasoning_effort": "extreme"})
+
+
+def _capturing_transport(model, params=None, usage=None):
+    t = OpenAICompatTransport("http://127.0.0.1:9/v1", "sk-test", model, params=params)
+    seen = []
+    usage = usage or SimpleNamespace(prompt_tokens=11, completion_tokens=3)
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hi"))], usage=usage)
+
+    def create(**kw):
+        seen.append(kw)
+        return resp
+
+    t._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    return t, seen
+
+
+def test_openai_transport_sends_the_resolved_parameters():
+    p = resolve_chat_params("gpt-5-mini", {"reasoning_effort": "low", "temperature": 0.5}, env={}, warn=False)
+    t, seen = _capturing_transport("gpt-5-mini", p)
+    t([{"role": "user", "content": "x"}], 77)
+    assert seen[-1]["max_completion_tokens"] == 77 and seen[-1]["reasoning_effort"] == "low"
+    assert "max_tokens" not in seen[-1] and "temperature" not in seen[-1] and seen[-1]["model"] == "gpt-5-mini"
+    t2, seen2 = _capturing_transport("Qwen/Qwen3-8B")  # vLLM fallback: exactly what it sent before
+    t2([{"role": "user", "content": "x"}], 77)
+    assert {k: v for k, v in seen2[-1].items() if k != "messages"} == {"model": "Qwen/Qwen3-8B", "max_tokens": 77}
+
+
+def test_usage_parsing_includes_cached_and_reasoning_tokens():
+    sdk_like = SimpleNamespace(prompt_tokens=1000, completion_tokens=300,
+                               prompt_tokens_details=SimpleNamespace(cached_tokens=600, audio_tokens=0),
+                               completion_tokens_details=SimpleNamespace(reasoning_tokens=200))
+    as_dict = {"prompt_tokens": 1000, "completion_tokens": 300, "total_tokens": 1300,
+               "prompt_tokens_details": {"cached_tokens": 600}, "completion_tokens_details": {"reasoning_tokens": 200}}
+    for u in (sdk_like, as_dict):
+        got = parse_usage(u)
+        assert (got.prompt_tokens, got.completion_tokens, got.cached_tokens, got.reasoning_tokens) == (1000, 300, 600, 200)
+    bare = parse_usage({"prompt_tokens": 5, "completion_tokens": 2, "prompt_tokens_details": None})
+    assert (bare.cached_tokens, bare.reasoning_tokens) == (None, None)  # e.g. vLLM without details
+    assert parse_usage({"prompt_tokens": 5}) is None and parse_usage(None) is None
+    t, _ = _capturing_transport("gpt-5-nano", usage=sdk_like)
+    assert t([{"role": "user", "content": "x"}], 10) == LLMResponse("hi", 1000, 300, 600, 200)
+    # the Budget charges prompt + completion only (reasoning is inside completion, cached inside prompt)
+    budget = Budget(10_000)
+    llm = LLMClient(budget, t, sleep_fn=lambda s: None)
+    llm.complete([{"role": "user", "content": "x"}], role="agent", max_tokens=10)
+    llm.complete([{"role": "user", "content": "x"}], role="sleep", max_tokens=10)
+    assert budget.used == 2 * 1300 and budget.agent_tokens == 1300
+    bd = budget.usage_breakdown()
+    assert bd["agent"] == {"calls": 1, "prompt_tokens": 1000, "completion_tokens": 300, "cached_tokens": 600,
+                           "reasoning_tokens": 200}
+    assert bd["total"]["cached_tokens"] == 1200 and bd["total"]["reasoning_tokens"] == 400
+    assert budget.usage_since(1) == bd["sleep"]
+    assert budget.usage_since(2) == {"calls": 0, "prompt_tokens": None, "completion_tokens": None,
+                                     "cached_tokens": None, "reasoning_tokens": None}
+
+
+def _status_error(status, code=None, type_=None):
+    import openai
+
+    e = openai.APIStatusError.__new__(openai.APIStatusError)  # no HTTP stack needed
+    Exception.__init__(e, f"HTTP {status}")
+    e.status_code, e.code, e.type, e.body = status, code, type_, {"code": code, "type": type_, "message": "m"}
+    return e
+
+
+@pytest.mark.parametrize("code, type_", [
+    ("insufficient_quota", "insufficient_quota"), ("credit_balance_exhausted", "insufficient_quota"),
+    ("organization_spend_limit_exceeded", None), ("project_spend_limit_exceeded", "insufficient_quota"),
+    ("organization_usage_limit_exceeded", None), (None, "insufficient_quota"),
+])
+def test_billing_errors_are_not_retried(code, type_):
+    t = OpenAICompatTransport("http://127.0.0.1:9/v1", "sk-test", "gpt-5-mini")
+    calls = []
+
+    def create(**kw):
+        calls.append(kw)
+        raise _status_error(429, code, type_)
+
+    t._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    delays = []
+    budget = Budget(1000)
+    with pytest.raises(BillingError, match="Retrying cannot help"):
+        LLMClient(budget, t, sleep_fn=delays.append).complete([{"role": "user", "content": "x"}], role="agent",
+                                                              max_tokens=10)
+    assert len(calls) == 1 and delays == [] and budget.used == 0
+    # a plain rate limit (429 without a billing code) is still retried
+    t._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kw: (_ for _ in ()).throw(_status_error(429, "rate_limit_exceeded", "requests")))))
+    with pytest.raises(TransientLLMError):
+        t([{"role": "user", "content": "x"}], 10)
+    assert billing_error_from_body(429, {"error": {"code": "slow_down", "type": "rate_limit_error"}}) is None
+
+
+def test_loop_billing_error_stops_the_run_writes_outputs_and_reraises(run_dir, mock_cfg):
+    class BillingAfter:
+        def __init__(self, n):
+            self.n, self.calls = n, 0
+
+        def __call__(self, messages, max_tokens):
+            self.calls += 1
+            if self.calls > self.n:
+                raise BillingError("You exceeded your current quota", status=429, code="insufficient_quota")
+            return LLMResponse(GOOD_REPLY, 60, 40)
+
+    t = BillingAfter(3)
+    llm = LLMClient(Budget(10_000), t, sleep_fn=lambda s: pytest.fail("billing errors must not back off"))
+    with pytest.raises(BillingError):
+        run(mock_cfg(total_token_budget=10_000, run_id="bill"), TextEvaluator(), llm, NoSleep(), out_dir=run_dir)
+    s = json.loads((run_dir / "bill" / "summary.json").read_text(encoding="utf-8"))
+    assert s["stop_reason"] == "billing_error" and "insufficient_quota" in s["error"] and s["steps_completed"] == 3
+    assert t.calls == 4
+
+
+def test_proxy_applies_the_runs_parameters_and_records_the_usage_breakdown(monkeypatch):
+    import infra.llm_proxy as lp
+
+    sent = []
+
+    def fake_post(url, body, headers, timeout_s):
+        sent.append(dict(body))
+        return 200, {"choices": [{"message": {"content": "ok"}}],
+                     "usage": {"prompt_tokens": 500, "completion_tokens": 120, "total_tokens": 620,
+                               "prompt_tokens_details": {"cached_tokens": 256},
+                               "completion_tokens_details": {"reasoning_tokens": 64}}}
+
+    monkeypatch.setattr(lp, "post_json", fake_post)
+    params = resolve_chat_params("gpt-5-mini", {"reasoning_effort": "low"}, env={})
+    proxy = LLMProxy("http://upstream.invalid/v1", "k", "gpt-5-mini", chat_params=params)
+    try:
+        budget = Budget(10_000)
+        proxy.register("r", budget)
+        body = {"model": "x", "messages": [], "max_tokens": 99_999, "temperature": 0.3, "top_p": 0.9}
+        status, _ = proxy.handle_completion({"X-Run-Id": "r", "X-Budget-Role": "sleep"}, json.dumps(body).encode())
+        assert status == 200
+        fwd = sent[-1]
+        assert fwd["max_completion_tokens"] == 10_000 and "max_tokens" not in fwd  # clamped, renamed
+        assert fwd["reasoning_effort"] == "low" and "temperature" not in fwd and "top_p" not in fwd
+        assert fwd["model"] == "gpt-5-mini"
+        assert budget.sleep_tokens == 620  # prompt + completion, as reported
+        assert proxy.usage_log("r") == [{"role": "sleep", "prompt_tokens": 500, "completion_tokens": 120,
+                                         "cached_tokens": 256, "reasoning_tokens": 64}]
+        assert budget.usage_breakdown()["sleep"]["cached_tokens"] == 256
+    finally:
+        proxy.stop()
+
+
+def test_proxy_lm_does_not_retry_billing_errors(monkeypatch):
+    import infra.llm_proxy as lp
+
+    calls = []
+
+    def fake_post(url, body, headers, timeout_s):
+        calls.append(body)
+        return 429, {"error": {"message": "You exceeded your current quota", "type": "insufficient_quota",
+                               "code": "insufficient_quota"}}
+
+    monkeypatch.setattr(lp, "post_json", fake_post)
+    delays = []
+    lm = ProxyLM("http://proxy.invalid/v1", "r", sleep_fn=delays.append)
+    with pytest.raises(BillingError):
+        lm("x")
+    assert len(calls) == 1 and delays == [] and lm.billing_error is not None
+    with pytest.raises(BillingError):  # remembered: no further upstream calls
+        lm("y")
+    assert len(calls) == 1
+
+
+def test_cost_counts_cached_tokens_once_and_reasoning_tokens_once():
+    price = ModelPrice(input=0.25, cached_input=0.025, output=2.0)
+    # 1M prompt of which 400k cached, 200k completion of which 150k reasoning
+    got = usage_cost(1_000_000, 200_000, 400_000, price)
+    assert got == pytest.approx(0.6 * 0.25 + 0.4 * 0.025 + 0.2 * 2.0)  # = 0.56
+    assert usage_cost(1_000_000, 200_000, None, price) == pytest.approx(0.25 + 0.4)
+    assert usage_cost(10, 10, 5, ModelPrice(input=None, output=1.0)) is None
+    assert usage_cost(1_000_000, 0, 1_000_000, ModelPrice(input=1.0, output=1.0)) == pytest.approx(1.0)  # no cached price
+    usage = {"agent": {"prompt_tokens": 1_000_000, "completion_tokens": 200_000, "cached_tokens": 400_000},
+             "sleep": {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": None},
+             "total": {"prompt_tokens": 1_000_000, "completion_tokens": 200_000, "cached_tokens": 400_000}}
+    block = cost_block(usage, "gpt-5-mini-2025-08-07", price_table({"gpt-5-mini": price.model_dump()}))
+    assert block["price_key"] == "gpt-5-mini" and block["total"] == pytest.approx(0.56) and block["complete"]
+    assert block["by_role"] == {"agent": pytest.approx(0.56), "sleep": 0.0}
+    unknown = cost_block(usage, "Qwen/Qwen3-8B", price_table())
+    assert unknown["total"] is None and not unknown["complete"] and "no price" in unknown["notes"][0]
+    assert lookup_price("openai/gpt-5-nano", DEFAULT_PRICES)[0] == "gpt-5-nano"
+    for m in ("gpt-5-nano", "gpt-5-mini"):  # verified table entries carry their source and date
+        assert DEFAULT_PRICES[m].known and DEFAULT_PRICES[m].source and DEFAULT_PRICES[m].checked
+
+
+def test_loop_logs_usage_per_line_and_cost_per_run(run_dir, mock_cfg):
+    class Detailed:
+        model = "gpt-5-mini"
+
+        def __call__(self, messages, max_tokens):
+            return LLMResponse(GOOD_REPLY if "consolidat" not in messages[0]["content"].lower() else "notes",
+                               60, 40, cached_tokens=20, reasoning_tokens=10)
+
+    budget = Budget(1000)
+    s = run(mock_cfg(), TextEvaluator(), LLMClient(budget, Detailed(), sleep_fn=lambda s: None), Summarize(every_n=3),
+            out_dir=run_dir)
+    hist = hist_of(run_dir, s)
+    assert all(set(USAGE_FIELDS) <= set(h) for h in hist)
+    assert hist[0]["llm_calls"] == 0 and hist[0]["llm_prompt_tokens"] is None  # seed step: no call
+    steps = [h for h in hist if h["event"] == "step" and h["step"] > 0]
+    sleeps = [h for h in hist if h["event"] == "sleep"]
+    assert all((h["llm_calls"], h["llm_prompt_tokens"], h["llm_completion_tokens"], h["llm_cached_tokens"],
+                h["llm_reasoning_tokens"]) == (1, 60, 40, 20, 10) for h in steps + sleeps)
+    assert s["usage"]["agent"]["calls"] == 8 and s["usage"]["sleep"]["calls"] == 2
+    assert s["usage"]["total"]["prompt_tokens"] + s["usage"]["total"]["completion_tokens"] == budget.used == 1000
+    expected = (10 * (40 * 0.25 + 20 * 0.025 + 40 * 2.0)) / 1e6  # 10 calls at gpt-5-mini prices
+    assert s["cost"]["model"] == "gpt-5-mini" and s["cost"]["total"] == pytest.approx(expected)
+    assert s["cost"]["by_role"]["agent"] + s["cost"]["by_role"]["sleep"] == pytest.approx(expected)
+    assert s["llm_params"] is None  # a transport without resolved params (the mock) records none
 
 
 # ================================================================================================
@@ -1676,7 +1940,6 @@ def test_revise_edit_rewrites_item_text(memory_store):
     assert applied and it.text == "new wording"
 
 
-@pytest.mark.xfail(reason="not implemented: 'merge' edit op", strict=True)
 def test_merge_edit_combines_two_items(memory_store):
     a = memory_store.add(kind="rule", text="a", step=0, evidence=[1])
     b = memory_store.add(kind="rule", text="b", step=0, evidence=[2])
@@ -1684,7 +1947,63 @@ def test_merge_edit_combines_two_items(memory_store):
     assert applied and b.id not in memory_store.items and set(a.evidence) == {1, 2}
 
 
-@pytest.mark.xfail(reason="not implemented: 'remove' edit op", strict=True)
+def test_merge_keeps_union_of_evidence_and_tags_highest_status_and_max_strength(memory_store):
+    s = memory_store
+    a = s.add(kind="rule", text="hex init helps", step=2, status="tentative", strength=0.3, evidence=[1, 4],
+              approach_tags=["hex"])
+    b = s.add(kind="fact", text="hexagonal start is better", step=1, status="verified", strength=0.9,
+              evidence=[4, "r3.0"], approach_tags=["hex", "lattice"])
+    c = s.add(kind="rule", text="lattice starts win", step=5, status="contested", strength=0.5, evidence=[7])
+    applied, rejected = s.apply_edits([Edit("merge", target=a.id, item={"merge": [b.id, c.id],
+                                                                         "text": "Hex-lattice starts help"})], 9)
+    assert applied and not rejected and set(s.items) == {a.id}
+    assert a.text == "Hex-lattice starts help" and a.kind == "rule"
+    assert a.evidence == [1, 4, "r3.0", 7] and a.approach_tags == ["hex", "lattice"]
+    assert a.status == "verified" and a.strength == pytest.approx(0.9)  # highest status, max strength
+    assert a.created_step == 1 and a.last_supported_step == 5
+
+
+def test_merge_rejects_goal_mixes_g0_polarity_mixes_and_unknown_ids(memory_store):
+    s = memory_store
+    s.add(kind="goal", text="best line", step=0, item_id="g0")
+    g1, _ = s.set_goal("explore spirals", 1)
+    g2, _ = s.set_goal("refine with lbfgs", 1)
+    r = s.add(kind="rule", text="r", step=0)
+    d = s.add(kind="dead_end", text="d", step=0)
+    edits = [Edit("merge", target=g1, item={"merge": [r.id]}),     # goal + non-goal
+             Edit("merge", target="g0", item={"merge": [g1]}),     # g0 is code-maintained
+             Edit("merge", target=r.id, item={"merge": [d.id]}),   # rule + dead end (opposite polarity)
+             Edit("merge", target=r.id, item={"merge": ["m99"]}),  # unknown id
+             Edit("merge", target=r.id, item={"merge": [r.id]}),   # needs two distinct items
+             Edit("merge", target=g1, item={"merge": [g2], "text": "explore spirals then refine"})]
+    applied, rejected = s.apply_edits(edits, 2)
+    assert len(rejected) == 5 and len(applied) == 1
+    assert "goal with a non-goal" in rejected[0][1] and "g0" in rejected[1][1] and "dead_end" in rejected[2][1]
+    assert set(s.items) == {"g0", g1, r.id, d.id} and s.get(g1).text == "explore spirals then refine"
+
+
+def test_goals_replace_stale_goals_cap_at_three_and_render_first_after_g0(memory_store):
+    s = memory_store
+    s.add(kind="goal", text="Maximize the score. Best so far 0.5", step=0, status="verified", strength=1.0,
+          item_id="g0")
+    s.add(kind="rule", text="strong rule", step=0, status="verified", strength=1.0)
+    ids = [s.set_goal(f"goal {i}", step=i)[0] for i in range(1, 4)]
+    assert ids == ["g1", "g2", "g3"]
+    gid, action = s.set_goal("goal 1 revised", 4, replaces="g1")
+    assert gid == "g1" and action == "replaced g1" and s.get("g1").text == "goal 1 revised"
+    assert s.set_goal("goal 2", 5) == ("g2", "refreshed")
+    gid, action = s.set_goal("new direction", 6)  # cap reached: oldest untouched goal (g3) pushed out
+    assert gid == "g4" and "evicted g3" in action and len(s.goals()) == 3
+    gid, action = s.set_goal("replace the best line", 7, replaces="g0")  # g0 cannot be replaced
+    assert gid != "g0" and "ignored" in action and s.get("g0").text.startswith("Maximize")
+    lines = s.render(10_000).splitlines()
+    assert lines[0].startswith("- [g0] GOAL") and all("GOAL" in ln for ln in lines[:4])
+    assert "RULE" in lines[4]
+    before = {g.id: g.strength for g in s.goals()}
+    s.decay(8, 0.1)
+    assert s.evict(min_strength=0.5, max_items=1) and {g.id: g.strength for g in s.goals()} == before
+
+
 def test_remove_edit_deletes_item_but_never_a_goal(memory_store):
     it = memory_store.add(kind="rule", text="a", step=0)
     memory_store.add(kind="goal", text="g", step=0, item_id="g0")
@@ -1727,7 +2046,7 @@ def test_consolidation_cannot_verify_an_item_without_replay_evidence_in_the_same
     body = {"claims": [
         {"cid": "c1", "kind": "rule", "text": "replayed claim", "relation": "new", "status": "verified"},
         {"cid": "c2", "kind": "rule", "text": "asserted claim", "relation": "new", "status": "verified"},
-    ], "replays": [{"cid": "c1", "program": GOOD}]}
+    ], "replays": [{"cid": "c1", "control": BAD, "treatment": GOOD}]}
     llm, budget, _ = mock_llm(10_000, script=[json.dumps(body)])
     fs = _fs()
     fs.consolidate("task", _sleep_history(), llm, budget, step=5)
@@ -1838,7 +2157,31 @@ def test_malformed_consolidator_output_skips_cleanly_with_a_logged_error(mock_ll
         assert set(fs.store.items) == {"g0"}
 
 
-@pytest.mark.xfail(reason="not implemented: one retry of the consolidator call on malformed JSON", strict=True)
+def test_consolidator_goals_and_merges_are_applied_and_recorded(mock_llm):
+    fs = _fs()
+    fs.store.add(kind="goal", text="old best line", step=0, status="verified", strength=1.0, item_id="g0")
+    stale, _ = fs.store.set_goal("try random restarts", 0)
+    a = fs.store.add(kind="rule", text="hex init helps", step=0, evidence=[1], approach_tags=["hex"])
+    b = fs.store.add(kind="rule", text="hexagonal start is better", step=0, evidence=[2], status="verified")
+    d = fs.store.add(kind="dead_end", text="grid sweeps stall", step=0)
+    body = {"claims": [], "replays": [],
+            "goals": [{"text": "Refine the hex start with L-BFGS-B.", "replaces": stale},
+                      {"text": "Next: test spiral initializations.", "replaces": None},
+                      "Then shrink the step size.", {"text": "fourth goal is dropped"}],
+            "merges": [{"ids": [a.id, b.id], "text": "Hex-lattice starts help"}, {"ids": [a.id, d.id]}]}
+    llm, budget, _ = mock_llm(10_000, script=[json.dumps(body)])
+    m = fs.consolidate("task", _sleep_history(), llm, budget, step=5)
+    assert [g["action"] for g in m["goals"]] == [f"replaced {stale}", "added", "added"]
+    assert "kept the first 3" in m["parse_error"]
+    assert [x["applied"] for x in m["merges"]] == [True, False]
+    merged = fs.store.get(a.id)
+    assert b.id not in fs.store.items and merged.status == "verified" and set(merged.evidence) == {1, 2}
+    lines = fs.memory_section(10_000).splitlines()
+    assert lines[0].startswith("- [g0] GOAL: Maximize the score") and "Refine the hex start" in lines[1]
+    assert all("GOAL" in ln for ln in lines[:4]) and "GOAL" not in lines[4]
+    assert m["edits_applied"] == 1 and m["edits_rejected"] == 1
+
+
 def test_malformed_consolidator_json_is_retried_once(mock_llm):
     good = json.dumps({"claims": [{"cid": "c1", "kind": "fact", "text": "f", "relation": "new"}], "replays": []})
     llm, budget, transport = mock_llm(10_000, script=["{\"claims\": [", good])
@@ -1866,55 +2209,113 @@ def test_every_replay_produces_an_edit_or_is_listed_as_wasted(mock_llm):
             {"cid": "c5", "kind": "fact", "text": "bad program", "relation": "new"},
             {"cid": "c6", "kind": "dead_end", "text": "one-element outputs fail", "approach_tags": ["tiny"],
              "relation": "new"},
+            {"cid": "c7", "kind": "rule", "text": "old single-program shape", "relation": "new"},
+            {"cid": "c8", "kind": "rule", "text": "identical pair", "relation": "new"},
+            {"cid": "c10", "kind": "rule", "text": "invalid control", "relation": "new"},
         ],
         "replays": [
-            {"cid": "c1", "program": GOOD, "decides": "add c1 as verified"},
-            {"cid": "c2", "program": BAD, "decides": "add c2 as verified"},
-            {"cid": "c3", "program": CRASH, "decides": "add c3"},
-            {"cid": "c9", "program": GOOD, "decides": "nothing"},
-            {"cid": "c4", "program": GOOD, "decides": "support m77"},
-            {"cid": "c5", "program": 42, "decides": "?"},
-            {"cid": "c6", "program": SHAPE, "decides": "add c6"},
+            {"cid": "c1", "control": BAD, "treatment": GOOD, "decides": "add c1 as verified"},
+            {"cid": "c2", "control": GOOD, "treatment": BAD, "decides": "add c2 as verified"},
+            {"cid": "c3", "control": GOOD, "treatment": CRASH, "decides": "add c3"},
+            {"cid": "c9", "control": BAD, "treatment": GOOD, "decides": "nothing"},
+            {"cid": "c4", "control": BAD, "treatment": GOOD, "decides": "support m77"},
+            {"cid": "c5", "control": 42, "treatment": GOOD, "decides": "?"},
+            {"cid": "c6", "control": GOOD, "treatment": SHAPE, "decides": "add c6"},
+            {"cid": "c7", "program": GOOD, "decides": "add c7"},
+            {"cid": "c8", "control": GOOD, "treatment": "# same\n" + GOOD + "\n", "decides": "add c8"},
+            {"cid": "c10", "control": SHAPE, "treatment": GOOD, "decides": "add c10"},
         ],
     }
     llm, budget, transport = mock_llm(10_000, script=[json.dumps(consolidation)])
-    fs = _fs()
+    fs = _fs(max_claims=16)  # 9 claims: the default cap of 8 would drop c10 before its replay runs
     hist = _sleep_history()
     m = fs.consolidate("task", hist, llm, budget, step=5)
     recs = m["replays"]
-    assert len(recs) == 7  # none silently dropped
+    assert len(recs) == 10  # none silently dropped
     for r in recs:
         if "wasted" in r:
             continue
         target = r["edit"]["target"]
         assert target in fs.store.items and r["rid"] in fs.store.get(target).evidence
     wasted = {r["cid"]: r["wasted"] for r in recs if "wasted" in r}
-    assert set(wasted) == {"c3", "c9", "c4", "c5"}
-    assert "crashed" in wasted["c3"] and "rejected" in wasted["c4"]
-    assert m["replays_wasted"] == 4 and m["replays_run"] == 7
+    assert set(wasted) == {"c3", "c9", "c4", "c5", "c7", "c8", "c10"}
+    assert "treatment crashed" in wasted["c3"] and "rejected" in wasted["c4"]
+    assert "old schema" in wasted["c7"] and "identical" in wasted["c8"] and "control invalid" in wasted["c10"]
+    assert "old single-program shape" in m["parse_error"]
+    assert m["replays_wasted"] == 7 and m["replays_run"] == 10
     by_text = {i.text: i for i in fs.store.items.values()}
     assert by_text["target values win"].status == "verified"
     assert by_text["zeros are fine"].status == "refuted"
-    assert by_text["one-element outputs fail"].status == "verified"  # invalid by constraint confirms a dead end
+    assert by_text["one-element outputs fail"].status == "verified"  # invalid treatment confirms a dead end
     assert by_text["crashy probe"].status == "tentative"  # wasted replay falls back to a tentative add
-    # replay programs are evidence only: history untouched; evaluator ran c1, c2, c3, c4, c6
-    assert len(hist) == 6 and len(fs.evaluator.calls) == 5
+    # both scores and their difference are recorded
+    c1 = recs[0]
+    assert c1["control_score"] == pytest.approx(0.51) and c1["treatment_score"] == pytest.approx(1.0)
+    assert c1["score_diff"] == pytest.approx(0.49) and c1["evaluations"] == 2
+    # evaluator calls: 2 each for c1, c2, c3, c4, c6; 1 for c10 (control invalid -> treatment skipped);
+    # 0 for c5, c7, c8, c9. Replay programs are evidence only: history untouched.
+    assert len(fs.evaluator.calls) == m["replay_evaluations"] == 11 and [r["evaluations"] for r in recs][-1] == 1
+    assert m["replays_beat_run_best"] == 5  # GOOD (1.0) beats the run best 0.9 in c1, c2, c3, c4, c6
+    assert len(hist) == 6
     assert budget.sleep_calls == len(transport.calls) == 1 and budget.agent_calls == 0
 
 
-@pytest.mark.parametrize("kind, valid, score, error, ref, best, want", [
-    ("rule", True, 0.9, None, 0.9, 0.9, "confirmed"),
-    ("rule", True, 0.8, None, 0.9, 0.9, "refuted"),
-    ("rule", True, 0.8, None, None, None, "confirmed"),
-    ("dead_end", True, 0.95, None, 0.9, 0.9, "refuted"),  # beats the run best: not a dead end
-    ("dead_end", True, 0.85, None, 0.9, 0.9, "confirmed"),
-    ("dead_end", False, None, "circles overlap by 0.1", 0.9, 0.9, "confirmed"),  # invalid by constraint
-    ("fact", False, None, "circles overlap by 0.1", 0.9, 0.9, "refuted"),
-    ("fact", False, None, "timeout after 1s", 0.9, 0.9, None),  # crash -> no decision (wasted)
-    ("fact", False, None, "exit code 1: boom", 0.9, 0.9, None),
+def _o(score=None, valid=True, error=None):
+    return {"valid": valid, "score": score, "error": error}
+
+
+@pytest.mark.parametrize("kind, control, treatment, want", [
+    ("rule", _o(0.5), _o(0.6), "confirmed"),                    # treatment beats control
+    ("rule", _o(0.5), _o(0.5), "refuted"),                      # no gain
+    ("rule", _o(1.0), _o(1.0005), "refuted"),                   # gain below the 1e-3 relative margin
+    ("rule", _o(1.0), _o(1.002), "confirmed"),
+    ("dead_end", _o(0.5), _o(0.5), "confirmed"),                # change doesn't help
+    ("dead_end", _o(0.5), _o(0.4), "confirmed"),
+    ("dead_end", _o(0.5), _o(0.5004), "refuted"),               # treatment beat control
+    ("dead_end", _o(0.5), _o(None, False, "circles overlap by 0.1"), "confirmed"),  # invalid treatment
+    ("fact", _o(0.5), _o(None, False, "circles overlap by 0.1"), "refuted"),
+    ("fact", _o(0.5), _o(None, False, "timeout after 1s"), None),          # treatment crash: no decision
+    ("dead_end", _o(None, False, "exit code 1: boom"), _o(0.9), None),     # control crash: no decision
+    ("dead_end", _o(None, False, "circles overlap"), _o(0.9), None),       # invalid control: no baseline
+    ("rule", _o(0.5), None, None),                                         # treatment not run
 ])
-def test_replay_outcome_rules(kind, valid, score, error, ref, best, want):
-    assert decide({"kind": kind}, valid, score, error, ref, best) == want
+def test_replay_outcome_rules(kind, control, treatment, want):
+    assert decide(kind, control, treatment, margin=1e-3)[0] == want
+
+
+def test_minimal_probe_of_a_true_improvement_is_confirmed_far_below_the_run_best(mock_llm):
+    """The old rule compared a probe with the run's best and refuted true rules; the paired test doesn't."""
+    hist = _sleep_history()
+    for h in hist:  # a strong run: best 0.99
+        h["score"] = 0.95 + 0.008 * h["step"]
+    control = "def construct():\n    return [0.0, 0.0, 0.0, 0.0, 0.0]\n"
+    treatment = "def construct():\n    return [0.0, 0.0, 0.0, 0.0, 0.7]\n"  # one coordinate moved to target
+    body = {"claims": [{"cid": "c1", "kind": "rule", "text": "moving a coordinate to 0.7 raises the score",
+                        "evidence": [5], "relation": "new"}],
+            "replays": [{"cid": "c1", "change": "last coordinate 0 -> 0.7", "control": control,
+                         "treatment": treatment}]}
+    llm, budget, _ = mock_llm(10_000, script=[json.dumps(body)])
+    fs = _fs()
+    m = fs.consolidate("task", hist, llm, budget, step=5)
+    rec = m["replays"][0]
+    assert rec["treatment_score"] == pytest.approx(0.608) and rec["treatment_score"] < 0.99 - 0.3
+    assert rec["decision"] == "confirmed" and rec["beats_run_best"] is False
+    assert fs.store.find_text("moving a coordinate to 0.7 raises the score").status == "verified"
+
+
+def test_dead_end_is_refuted_when_the_treatment_beats_the_control(mock_llm):
+    control = "def construct():\n    return [0.0, 0.0, 0.0, 0.0, 0.0]\n"
+    treatment = "def construct():\n    return [0.0, 0.0, 0.0, 0.0, 0.7]\n"
+    body = {"claims": [{"cid": "c1", "kind": "dead_end", "text": "tuning single coordinates never helps",
+                        "approach_tags": ["coordinate-tuning"], "relation": "new"}],
+            "replays": [{"cid": "c1", "control": control, "treatment": treatment}]}
+    llm, budget, _ = mock_llm(10_000, script=[json.dumps(body)])
+    fs = _fs()
+    m = fs.consolidate("task", _sleep_history(), llm, budget, step=5)
+    assert m["replays"][0]["decision"] == "refuted" and m["replays"][0]["score_diff"] > 0
+    item = fs.store.find_text("tuning single coordinates never helps")
+    assert item.status == "refuted"
+    assert fs.store.match_dead_ends(["coordinate-tuning"]) == []  # a refuted dead end no longer fires
 
 
 def test_replay_edit_choice_by_relation_and_decision():
@@ -2106,14 +2507,15 @@ def test_schema_store_runs_in_rem_only_and_stays_within_cap(mock_llm, tmp_path):
     llm, budget, transport = mock_llm(100_000)
     flat = [{"event": "step", "step": s, "program_id": f"p{s}", "program": GOOD, "score": 0.5, "valid": True}
             for s in range(30)]
-    fs = _fs(schema=True, schema_min_items=2, schema_min_strength=0.5, plateau_window=5, max_block_tokens=80)
+    # cap 120: the mock consolidator now also writes a goal, which renders before schemas
+    fs = _fs(schema=True, schema_min_items=2, schema_min_strength=0.5, plateau_window=5, max_block_tokens=120)
     for t in ("a", "b", "c"):
         fs.store.add(kind="rule", text=f"strong {t}", step=0, status="verified", strength=0.9)
     m = fs.consolidate("task", flat, llm, budget, step=29)
     assert m["sleep_mode"] == "rem" and m["schema_ran"] and fs.schemas.schemas
     assert any("memory schemas" in c[0]["content"] for c in transport.calls)
-    section = fs.memory_section(80)
-    assert "SCHEMA" in section and count_tokens(section) <= 80
+    section = fs.memory_section(120)
+    assert "SCHEMA" in section and count_tokens(section) <= 120
     assert budget.sleep_calls == len(transport.calls)
     assert not list(tmp_path.iterdir())  # no persistence by default
     fs_p = _fs(schema=True, schema_min_items=2, schema_min_strength=0.5, plateau_window=5,
@@ -2902,6 +3304,115 @@ def test_summary_metrics_schema(matrix):
     assert _msum(matrix, "fixed_letta", 0)["arm"] == "fixed_letta"
 
 
+# ---- OpenAI configs, shared LLM settings, run_matrix pre-flight -------------------------------
+
+from scripts import run_matrix as rm  # noqa: E402
+
+OPENAI_CONFIGS = {  # name: (model, arms, seeds, runs incl. wave 2, waves, eval_backend, max_dollars)
+    "debug_openai": ("gpt-5-nano", {"no_sleep", "fatigue"}, [0], 2, {1: 2, 2: 0}, "local", 2),
+    "pilot_openai": ("gpt-5-mini", {"no_sleep", "fixed_letta", "fatigue"}, [0, 1], 6, {1: 6, 2: 0}, "local", 10),
+    "baselines_openai": ("gpt-5-mini", {"no_sleep", "fixed_letta", "fixed_matched", "random_matched", "fatigue"},
+                         [0, 1], 10, {1: 6, 2: 4}, "modal", 75),
+}
+
+
+@pytest.mark.parametrize("name", list(OPENAI_CONFIGS))
+def test_openai_configs_validate_plan_and_share_llm_settings(name):
+    model, arms, seeds, n_runs, waves, backend, cap = OPENAI_CONFIGS[name]
+    path = str(ROOT / "configs" / f"{name}.yaml")
+    s = load_suite(path)
+    assert s.base.model == model and s.base.llm.reasoning_effort == "low" and s.base.max_dollars == cap
+    assert s.base.eval_backend == backend and set(s.section.arms) == arms and s.section.problems == [36]
+    assert s.base.total_token_budget == (200_000 if name == "debug_openai" else 1_000_000)
+    ps, ss = rm.resolve_targets(path)
+    assert (ps, ss) == ([36], seeds)
+    mode, base, suite_, jobs, got_waves = rm.plan_launch(path, ps, ss, [], [])
+    assert mode == "suite" and len(jobs) == n_runs and got_waves == waves
+    sent = {json.dumps(resolve_chat_params(j.cfg.model, j.cfg.llm, env={}).to_dict(), sort_keys=True) for j in jobs}
+    assert len(sent) == 1  # identical model / token param / reasoning_effort in every arm (agent and sleep)
+    p = json.loads(sent.pop())
+    assert p["token_param"] == "max_completion_tokens" and p["reasoning_effort"] == "low" and p["temperature"] is None
+
+
+def test_existing_backend_configs_still_validate():
+    for name in ("example", "mock", "gepa", "gepa_mock"):
+        cfg = load_config(ROOT / "configs" / f"{name}.yaml")
+        assert resolve_chat_params(cfg.model, cfg.llm, env={}).token_param == "max_tokens"  # Qwen / vLLM path
+    for name in ("baselines", "baselines_mock"):
+        s = load_suite(ROOT / "configs" / f"{name}.yaml")
+        plan_suite(s, [s.base.problem_id], [0])
+
+
+@pytest.mark.parametrize("update, needle", [
+    ({"llm": {"reasoning_effort": "high"}}, "llm"),
+    ({"llm": {"token_param": "max_tokens"}}, "llm"),
+    ({"model": "gpt-5-nano"}, "model"),
+    ({"prices": {"gpt-5-mini": {"input": 0.0, "output": 0.0}}}, "prices"),
+    ({"max_dollars": 1000.0}, "max_dollars"),
+])
+def test_drift_check_requires_identical_model_and_llm_settings_in_every_arm(update, needle):
+    s = load_suite(ROOT / "configs" / "pilot_openai.yaml")
+    cfgs = [resolve_arm(s, a, 36, 0) for a in s.section.arms]
+    check_drift(s, cfgs)
+    data = cfgs[1].model_dump()
+    data.update(update)
+    with pytest.raises(ConfigDriftError, match=needle):
+        check_drift(s, cfgs[:1] + [RunConfig(**data)] + cfgs[2:])
+    bad = make_suite(s.base, BaselinesSection(**{**s.section.model_dump(), "overrides": {"fatigue": update}}))
+    with pytest.raises(ConfigDriftError):
+        plan_suite(bad, [36], [0])
+
+
+def test_preflight_refuses_above_max_dollars_and_prints_the_estimate():
+    s = load_suite(ROOT / "configs" / "pilot_openai.yaml")
+    lines = []
+    with pytest.raises(rm.PreflightRefused) as ei:
+        rm.preflight_check(s.base, 6, waves={1: 6, 2: 0}, max_dollars=0.01, log=lines.append)
+    est = ei.value.estimate
+    per_run = 1_000_000 + 16_384 + 2 * 8000  # budget + max_completion_tokens + prompt allowance
+    assert est["per_run_tokens"] == per_run and est["rate_per_1m"] == 2.0  # gpt-5-mini output price
+    assert est["cost"] == pytest.approx(6 * per_run * 2.0 / 1e6, abs=1e-4)
+    text = "\n".join(lines)
+    assert "estimate" in text and "REFUSED" in text and "exceeds the cap" in text and "--max-dollars" in text
+    ok = rm.preflight_check(s.base, 6, max_dollars=20, log=lambda m: None)
+    assert not ok["refused"] and ok["cap"] == 20
+    with pytest.raises(rm.PreflightRefused, match="exceeds"):  # the config's own cap (10) is used by default
+        rm.preflight_check(s.base, 6, log=lambda m: None)
+
+
+def test_preflight_refuses_without_price_or_cap_and_on_a_model_mismatch():
+    nocap = load_suite(ROOT / "configs" / "debug_openai.yaml").base.model_copy(update={"max_dollars": None})
+    with pytest.raises(rm.PreflightRefused, match="no spending cap"):
+        rm.preflight_check(nocap, 2, log=lambda m: None)
+    qwen = load_suite(ROOT / "configs" / "baselines.yaml").base  # no price for Qwen: refuse unless overridden
+    with pytest.raises(rm.PreflightRefused, match="no confirmed price"):
+        rm.preflight_check(qwen, 7, max_dollars=100, log=lambda m: None)
+    assert rm.preflight_check(qwen, 7, max_dollars=0, price_per_1m=0, log=lambda m: None)["cost"] == 0
+    unconfirmed = nocap.model_copy(update={"max_dollars": 5, "prices": {"gpt-5-nano": ModelPrice()}})
+    with pytest.raises(rm.PreflightRefused, match="no confirmed price"):
+        rm.preflight_check(unconfirmed, 2, log=lambda m: None)
+    with pytest.raises(rm.PreflightRefused, match="LLM_MODEL"):
+        rm.preflight_check(nocap.model_copy(update={"max_dollars": 5}), 2, env_model="Qwen/Qwen3-8B",
+                           log=lambda m: None)
+
+
+def test_run_matrix_cli_refuses_with_exit_2_and_mock_skips_the_check(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("LLM_MODEL", "gpt-5-mini")  # wins over any .env value (load_dotenv never overrides)
+    monkeypatch.chdir(tmp_path)  # no .env here: nothing real is loaded
+    ran = []
+    monkeypatch.setattr(rm, "run_suite_local", lambda *a, **k: ran.append(a))
+    cfg = str(ROOT / "configs" / "pilot_openai.yaml")
+    with pytest.raises(SystemExit) as ei:
+        rm._local(["--config", cfg, "--max-dollars", "0.01"])
+    assert ei.value.code == 2 and ran == []
+    out = capsys.readouterr().out
+    assert "pre-flight cost estimate" in out and "$12.39" in out and "REFUSED" in out
+    rm._local(["--config", cfg, "--max-dollars", "13", "--estimate-only"])  # within the cap: prints, runs nothing
+    assert "pre-flight OK" in capsys.readouterr().out and ran == []
+    rm._local(["--config", cfg, "--mock-llm", "--estimate-only"])
+    assert "no pre-flight cost check" in capsys.readouterr().out
+
+
 # ================================================================================================
 # Section 8 · Integrations
 # ================================================================================================
@@ -2913,22 +3424,6 @@ LOOP_SUMMARY_KEYS = {  # keys of harness/loop.py's summary.json that analysis co
     "best_program_id", "best_score", "best_known", "best_normalized", "best_step", "budget",
     "llm_model", "config_model", "wallclock_s", "config",
 }
-
-
-class CountingEvaluator:
-    """Wraps an evaluator and counts sandbox evaluations."""
-
-    def __init__(self, inner):
-        self.inner, self.calls = inner, 0
-        for k in ("problem_id", "name", "best_known", "timeout_s", "description"):
-            setattr(self, k, getattr(inner, k))
-
-    def seed_program(self):
-        return self.inner.seed_program()
-
-    def evaluate(self, program):
-        self.calls += 1
-        return self.inner.evaluate(program)
 
 
 @pytest.fixture
@@ -2986,11 +3481,11 @@ def test_gepa_stops_at_matched_metric_calls(run_dir, p36_stack):
     from arms.gepa_arm import run_gepa
 
     _, proxy = p36_stack
-    ev = CountingEvaluator(CirclePacking26(timeout_s=30))
+    ev = CountingEvaluator(CirclePacking26(timeout_s=30), EvalBudget())
     s = run_gepa(gepa_cfg(max_steps=5), ev, Budget(100_000), proxy, out_dir=run_dir)
     assert s["stop_reason"] == "max_steps" and s["steps_completed"] == 5
-    assert ev.calls == 6  # seed + max_steps sandbox evaluations, never more
-    assert s["gepa"]["internal_metric_calls"] > ev.calls  # gepa's own count includes memo hits
+    assert ev.budget.used == 6  # seed + max_steps sandbox evaluations, never more
+    assert s["gepa"]["internal_metric_calls"] > ev.budget.used  # gepa's own count includes memo hits
     assert s["gepa"]["over_limit_calls"] == 0
 
 
@@ -2999,9 +3494,9 @@ def test_gepa_respects_max_metric_calls_over_max_steps(run_dir, p36_stack):
     from arms.gepa_arm import run_gepa
 
     _, proxy = p36_stack
-    ev = CountingEvaluator(CirclePacking26(timeout_s=30))
+    ev = CountingEvaluator(CirclePacking26(timeout_s=30), EvalBudget())
     s = run_gepa(gepa_cfg(max_steps=50, gepa={"max_metric_calls": 3}), ev, Budget(100_000), proxy, out_dir=run_dir)
-    assert s["steps_completed"] == 3 and ev.calls == 4
+    assert s["steps_completed"] == 3 and ev.budget.used == 4
 
 
 @needs_gepa
@@ -3172,7 +3667,7 @@ def test_gepa_sleep_rounds_sleep_and_memory_reaches_the_background(run_dir, mock
     sleeps = [h for h in hist if h["event"] == "sleep"]
     assert s["run_id"] == "p0_gepa_full_sleep_s0" and s["stop_reason"] == "max_steps"
     assert s["rounds"] == 3 and s["sleeps"] == 2
-    assert stub.params == {"every_n": 3} and isinstance(stub.evaluator, TextEvaluator)
+    assert stub.params == {"every_n": 3} and isinstance(stub.evaluator.inner, TextEvaluator)
     assert [h["step"] for h in steps] == list(range(10)) and all(set(h) == set(FIELDS) for h in hist)
     assert [c["step"] for c in stub.calls] == [3, 6] == [h["step"] for h in sleeps]
     assert sleeps[0]["details"]["block"] == "MEMO-1: radii pinned to walls help"
@@ -3280,14 +3775,14 @@ def test_live_gepa_short_run_on_p36_through_the_proxy(run_dir):
 
     _require_env("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")
     budget = Budget(60_000)
-    ev = CountingEvaluator(CirclePacking26(timeout_s=30))
+    ev = CountingEvaluator(CirclePacking26(timeout_s=30), EvalBudget())
     with LLMProxy.from_env(request_timeout_s=180) as proxy:
         s = run_gepa(gepa_cfg(max_steps=50, total_token_budget=60_000, gepa={"max_metric_calls": 2}), ev, budget,
                      proxy, out_dir=run_dir)
         log = proxy.usage_log(s["run_id"]) if hasattr(proxy, "usage_log") else []
     hist = hist_of(run_dir, s)
     assert s["stop_reason"] in ("max_steps", "budget_exhausted"), s.get("gepa")
-    assert s["steps_completed"] <= 2 and ev.calls <= 3  # max_metric_calls respected
+    assert s["steps_completed"] <= 2 and ev.budget.used <= 3  # max_metric_calls respected
     assert all(set(h) == set(FIELDS) for h in hist) and [h["step"] for h in hist] == list(range(len(hist)))
     assert budget.agent_calls >= 1 and budget.used > 0
     if log:
@@ -3455,6 +3950,24 @@ def test_steps_to_95_percent_is_computed_including_not_reached():
     assert br.outcome("budget_to_95") == (0.75, False)
     assert cb.BaselineRun(run=None, arm="x", metrics={"reach": {"0.95": {"reached": False}}}).outcome(
         "budget_to_95") == (1.0, True)
+
+
+def test_compare_baselines_reports_total_cost_per_arm(tmp_path, capsys):
+    root = write_paired_runs(tmp_path / "runs", effect=0.0, n_pairs=3)
+    for p in root.glob("*/summary.json"):
+        s = json.loads(p.read_text(encoding="utf-8"))
+        if s["arm"] == "fatigue":
+            s["cost"] = {"total": 0.25, "currency": "USD"}
+        elif s["seed"] < 2:  # no_sleep: one run without a known cost
+            s["cost"] = {"total": 0.1, "currency": "USD"}
+        p.write_text(json.dumps(s), encoding="utf-8")
+    rep = cb.compare(root, n_boot=200)
+    fat, ns = rep["arm_summaries"]["fatigue"], rep["arm_summaries"]["no_sleep"]
+    assert (fat["cost_total"], fat["cost_mean"], fat["cost_unknown_runs"]) == (pytest.approx(0.75), pytest.approx(0.25), 0)
+    assert (ns["cost_total"], ns["cost_unknown_runs"]) == (pytest.approx(0.2), 1)
+    assert rep["cost"]["cost_total"] == pytest.approx(0.95) and rep["cost"]["cost_unknown_runs"] == 1
+    text = cb.format_report(rep)
+    assert "cost$" in text and "0.7500" in text and "0.2000+" in text and "total cost of all runs: 0.9500+" in text
 
 
 def test_every_baseline_figure_is_produced_from_mock_logs(matrix, tmp_path):
@@ -3689,3 +4202,130 @@ def test_alphaevolve_report_markdown_flags_unverified_beats(tmp_path):
     assert "p0_no_sleep_s0 | 0 |" in md and "not in the AlphaEvolve benchmark" in md
     assert "## By status category" in md and "matched_optimal" in md
     assert "ShinkaEvolve" in md and "Figures skipped (--no-figures)." in md
+
+
+# ================================================================================================
+# Section 16 · Evaluator-call accounting (harness/evals.py) and vLLM thinking
+# ================================================================================================
+
+from harness.evals import CountingEvaluator, EvalBudget, EvalExhausted  # noqa: E402
+
+
+def test_eval_budget_counts_by_role_and_caps():
+    b = EvalBudget(3)
+    assert (b.used, b.remaining, b.exhausted) == (0, 3, False)
+    b.charge("agent"), b.charge("sleep"), b.charge("agent")
+    assert (b.agent_evals, b.sleep_evals, b.used) == (2, 1, 3)
+    assert b.exhausted and b.remaining == 0
+    with pytest.raises(EvalExhausted):
+        b.check()
+    snap = b.snapshot()
+    assert snap == {"used": 3, "limit": 3, "remaining": 0, "agent_evals": 2, "sleep_evals": 1}
+    assert EvalBudget().limit is None and EvalBudget().remaining is None
+    EvalBudget().check()  # uncapped: never raises
+    with pytest.raises(ValueError):
+        EvalBudget(0)
+
+
+def test_counting_evaluator_charges_checks_and_delegates():
+    ev = CountingEvaluator(TextEvaluator(), EvalBudget(10))
+    assert ev.best_known == 1.0 and ev.name == "text_mock" and "construct" in ev.description
+    res = ev.evaluate(GOOD)
+    assert isinstance(res, EvalResult)
+    assert ev.budget.agent_evals == 1
+    ev.tagged("sleep").evaluate(BAD)
+    assert ev.budget.sleep_evals == 1 and ev.budget.used == 2
+    ev.evaluate("not a program")  # invalid results still cost an evaluator call
+    assert ev.budget.used == 3
+
+
+def test_counting_evaluator_refuses_at_limit_before_calling():
+    inner = TextEvaluator()
+    ev = CountingEvaluator(inner, EvalBudget(1))
+    ev.evaluate(GOOD)
+    with pytest.raises(EvalExhausted):
+        ev.evaluate(GOOD)
+    with pytest.raises(EvalExhausted):
+        ev.tagged("sleep").evaluate(GOOD)
+    assert len(inner.calls) == 1 and ev.budget.used == 1  # never exceeds the limit
+
+
+class _EvalOnSleep:
+    """Policy whose sleep spends one evaluator call through the bound (sleep-tagged) evaluator."""
+    name = "eval_on_sleep"
+    last_depth = None
+
+    def should_sleep(self, step, history):
+        return step >= 1
+
+    def bind(self, *, evaluator):
+        self._evaluator = evaluator
+
+    def sleep(self, task, block, history, llm, budget):
+        self._evaluator.evaluate(GOOD)
+        return block or "notes"
+
+
+def test_loop_counts_every_eval_and_stops_at_eval_limit(mock_llm, mock_cfg, run_dir):
+    llm, _, _ = mock_llm(100_000)
+    s = run(mock_cfg(max_steps=4), TextEvaluator(), llm, NoSleep(), out_dir=run_dir)
+    ev = s["evaluations"]
+    assert ev["limit"] is None and ev["sleep_evals"] == 0
+    assert ev["used"] == ev["agent_evals"] == s["steps_completed"] + 1  # seed + one per step
+
+    llm, _, _ = mock_llm(100_000)
+    s = run(mock_cfg(max_steps=50, max_evaluations=3), TextEvaluator(), llm, NoSleep(), out_dir=run_dir)
+    assert s["stop_reason"] == "eval_limit" and s["steps_completed"] == 2
+    assert s["evaluations"]["used"] == 3 and s["evaluations"]["limit"] == 3
+
+
+def test_loop_sleep_evals_are_counted_separately_and_can_hit_the_cap(mock_llm, mock_cfg, run_dir):
+    llm, _, _ = mock_llm(100_000)
+    s = run(mock_cfg(max_steps=2), TextEvaluator(), llm, _EvalOnSleep(), out_dir=run_dir)
+    ev = s["evaluations"]
+    assert ev["sleep_evals"] == 2 and ev["agent_evals"] == 3 and ev["used"] == 5  # seed + 2 steps + 2 sleeps
+
+    llm, _, _ = mock_llm(100_000)
+    s = run(mock_cfg(max_steps=50, max_evaluations=2), TextEvaluator(), llm, _EvalOnSleep(),
+            out_dir=run_dir)
+    assert s["stop_reason"] == "eval_limit" and s["evaluations"]["used"] == 2
+
+
+def test_chat_params_thinking_sends_chat_template_kwargs_for_vllm():
+    p = resolve_chat_params("Qwen/Qwen3-8B", {"thinking": True}, env={}, warn=False)
+    assert p.thinking is True and p.reasoning_model is False
+    assert p.request_kwargs(64) == {"max_tokens": 64,
+                                    "extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
+    body = {"max_tokens": 8}
+    p.apply_to_body(body)
+    assert body["chat_template_kwargs"] == {"enable_thinking": True} and body["max_tokens"] == 8
+
+
+def test_chat_params_thinking_is_dropped_for_reasoning_models():
+    p = resolve_chat_params("gpt-5-mini", {"thinking": True, "reasoning_effort": "low"}, env={}, warn=False)
+    assert p.thinking is None and "thinking" in p.dropped
+    assert "extra_body" not in p.request_kwargs(64)
+    p = resolve_chat_params("Qwen/Qwen3-8B", None, env={"LLM_THINKING": "false"}, warn=False)
+    assert p.thinking is False
+    assert p.request_kwargs(8)["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_strip_think_removes_reasoning_blocks():
+    from llm.client import strip_think
+    assert strip_think("<think>reasoning\nabout x</think>the answer") == "the answer"
+    assert strip_think("x <think>a\nb</think> y <think>z</think> w") == "x  y  w"
+    assert strip_think("no tags here") == "no tags here"
+    assert strip_think("") == ""
+
+
+def test_summarize_uses_sleep_max_tokens_for_the_completion_cap():
+    calls = []
+
+    def transport(messages, max_tokens):
+        calls.append(max_tokens)
+        return LLMResponse("notes", 10, 5)
+
+    pol = Summarize(every_n=1, sleep_max_tokens=777)
+    llm = LLMClient(Budget(10**6), transport, sleep_fn=lambda s: None)
+    out = pol.sleep("task", "", [], llm, None)
+    assert calls == [777] and out == "notes"

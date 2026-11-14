@@ -53,6 +53,18 @@ the sleep decision taken after it; sleep lines carry the state right after the s
   sleep_deferred          bool   a due sleep was deferred after this step (debt added)
   sleep_depth             "forget" | "nrem" | "nrem_rem" | null
 
+LLM usage since the previous line (harness/budget.py Budget.usage_since; every writer: loop, GEPA arms).
+A step line covers the agent call that produced it (GEPA: the reflection calls since the previous
+evaluation); a sleep line covers that sleep's LLM calls. A discarded (budget-overshooting) call has
+no line; it is still in summary.json["usage"]. Values as reported by the API, never estimated.
+  llm_calls              int | null   charged calls since the previous line (0 = none)
+  llm_prompt_tokens      int | null   sum of usage.prompt_tokens (null when llm_calls is 0)
+  llm_completion_tokens  int | null   sum of usage.completion_tokens (includes reasoning tokens)
+  llm_cached_tokens      int | null   sum of usage.prompt_tokens_details.cached_tokens (subset of prompt;
+                                      null when no call reported it)
+  llm_reasoning_tokens   int | null   sum of usage.completion_tokens_details.reasoning_tokens (subset of
+                                      completion; null when no call reported it)
+
 `details` is an addition to the spec'd schema: it carries the consolidated block so
 masked-prediction and analysis (tasks 5 and 8) can replay what the agent saw.
 """
@@ -67,6 +79,9 @@ from typing import Any
 
 from harness.fatigue import FATIGUE_FIELDS
 
+USAGE_FIELDS = ("llm_calls", "llm_prompt_tokens", "llm_completion_tokens", "llm_cached_tokens",
+                "llm_reasoning_tokens")
+
 FIELDS = (
     "run_id", "step", "parent_id", "program_id", "program", "score", "valid", "error",
     "delta_vs_best", "agent_tokens", "sleep_tokens", "wallclock", "event", "details", "side_info",
@@ -74,7 +89,26 @@ FIELDS = (
     "context_tokens", "pressure", "sleep_mode", "block_tokens", "items_added", "items_evicted",
     "replays_wasted",
     *FATIGUE_FIELDS,
+    *USAGE_FIELDS,
 )
+
+
+class UsageCursor:
+    """Per-line usage fields: the Budget's calls since the previous take()."""
+
+    def __init__(self, budget: Any):
+        self.budget = budget
+        self.pos = len(getattr(budget, "calls", []))
+
+    def take(self) -> dict:
+        calls = getattr(self.budget, "calls", None)
+        if calls is None:
+            return {k: None for k in USAGE_FIELDS}
+        agg = self.budget.usage_since(self.pos)
+        self.pos += agg["calls"]
+        return {"llm_calls": agg["calls"], "llm_prompt_tokens": agg["prompt_tokens"],
+                "llm_completion_tokens": agg["completion_tokens"], "llm_cached_tokens": agg["cached_tokens"],
+                "llm_reasoning_tokens": agg["reasoning_tokens"]}
 
 
 def _finite_or_none(x: float | None) -> float | None:

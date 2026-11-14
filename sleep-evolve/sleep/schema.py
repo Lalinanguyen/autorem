@@ -44,7 +44,7 @@ class Schema:
 
 class SchemaStore:
     def __init__(self, *, min_strength: float = 0.6, min_items: int = 3, max_schemas: int = 4,
-                 max_tokens: int = 512, max_chars: int = 300, path: str | None = None, persist: bool = False):
+                 max_tokens: int = 2048, max_chars: int = 300, path: str | None = None, persist: bool = False):
         self.min_strength = min_strength
         self.min_items = min_items
         self.max_schemas = max_schemas

@@ -48,8 +48,8 @@ def execute(cfg: GEPAArmConfig, *, mock_llm: bool = False, out_dir: str | None =
             proxy = stack.enter_context(LLMProxy(upstream.base_url, "mock-key", "mock-model"))
             sleep_llm = LLMClient(budget, MockTransport(seed=cfg.seed))
         else:
-            proxy = stack.enter_context(LLMProxy.from_env())
-            sleep_llm = LLMClient.from_env(budget)
+            proxy = stack.enter_context(LLMProxy.from_env(cfg.llm))
+            sleep_llm = LLMClient.from_env(budget, cfg.llm)
 
         if cfg.arm == "gepa":
             summary = run_gepa(cfg, evaluator, budget, proxy, out_dir=out_dir)

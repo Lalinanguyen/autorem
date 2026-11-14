@@ -1,4 +1,11 @@
-"""Run configuration, loaded from YAML. LLM endpoint settings are NOT here: they come only from env vars."""
+"""Run configuration, loaded from YAML.
+
+The LLM ENDPOINT (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL) is not here: it comes only from env vars.
+Model-dependent request parameters are here (`llm:`, resolved by llm/chat_params.py: config > env >
+auto by model name), as are the price table (`prices:`, harness/cost.py) and the matrix pre-flight
+cap (`max_dollars`, scripts/run_matrix.py). All three are ordinary RunConfig fields, so the baseline
+drift check (harness/baselines.py) forces them to be identical in every arm.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +15,30 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field
 
+from harness.cost import ModelPrice
 from harness.fatigue import FatigueConfig
+
+TokenParam = Literal["auto", "max_tokens", "max_completion_tokens"]
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+class LLMSettings(BaseModel):
+    """Request parameters, identical for agent and sleep calls (llm/chat_params.py).
+
+    null = fall back to the env var (LLM_TOKEN_PARAM, LLM_REASONING_EFFORT, LLM_TEMPERATURE,
+    LLM_REASONING_MODEL), then to auto-detection by model name."""
+
+    model_config = {"extra": "forbid"}
+
+    token_param: TokenParam | None = Field(
+        None, description="auto: max_completion_tokens for reasoning models (gpt-5*, o-series...), else max_tokens")
+    reasoning_effort: ReasoningEffort | None = Field(
+        None, description="sent only to reasoning models; null = not sent (the model's default)")
+    temperature: float | None = Field(
+        None, description="sent only when the model accepts it (not to reasoning models unless effort is none)")
+    reasoning_model: bool | None = Field(None, description="null = auto-detect from the model name")
+    thinking: bool | None = Field(
+        None, description="vLLM/Qwen only: chat_template_kwargs enable_thinking; never sent to reasoning models")
 
 
 class ServeConfig(BaseModel):
@@ -65,6 +95,14 @@ class RunConfig(BaseModel):
         description="Expected model name. The harness calls LLM_MODEL; a mismatch is logged as a warning.",
     )
     serve: ServeConfig = Field(default_factory=ServeConfig)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    prices: dict[str, ModelPrice] = Field(
+        default_factory=dict, description="USD per 1M tokens per model, over harness/cost.py DEFAULT_PRICES")
+    max_dollars: float | None = Field(
+        None, ge=0, description="run_matrix pre-flight cap on the conservative cost estimate (CLI --max-dollars wins)")
+    max_evaluations: int | None = Field(
+        None, gt=0, description="shared cap on evaluator calls (agent steps + replays + sandbox evals); "
+                                "None = uncapped. The eval-matched counterpart of total_token_budget")
     out_dir: str = "runs"
     run_id: str | None = None
 

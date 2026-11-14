@@ -17,6 +17,12 @@ loop, a FatigueMonitor (harness/fatigue.py, `cfg.fatigue`) observes every step l
 written and its fields are logged with it (GEPA prompts carry no awake header, so calibration and
 perseveration are null; load, stagnation, sloppiness, narrowing still measure).
 
+Usage and cost: every line carries the LLM usage since the previous line (harness/logging.py
+USAGE_FIELDS; the proxy charges the Budget with the cached / reasoning breakdown), and summary.json
+carries `usage`, `llm_params` and `cost` exactly as harness/loop.py writes them. A billing / quota
+refusal (ProxyLM.billing_error) stops the run with stop_reason "billing_error" and is re-raised
+after the outputs are written.
+
 Requires the optional dependency group: `uv sync --group gepa`.
 """
 
@@ -38,8 +44,9 @@ from pydantic import BaseModel, Field
 from evaluators.base import INVALID_SCORE, EvalResult, Evaluator, invalid, normalized_score
 from harness.budget import Budget, BudgetExhausted
 from harness.config import RunConfig
+from harness.evals import CountingEvaluator, EvalBudget, EvalExhausted
 from harness.fatigue import FatigueMonitor, SleepDepth
-from harness.logging import FIELDS, RunLogger
+from harness.logging import FIELDS, RunLogger, UsageCursor
 from infra.llm_proxy import LLMProxy, ProxyLM
 
 ARM_NAMES = {"gepa": "gepa", "gepa_sleep": "gepa_full_sleep"}
@@ -175,6 +182,13 @@ class GEPASession:
     error: str | None = None
     observe: Callable[[int, dict], dict] | None = None  # optional sleep-policy hook
     monitor: FatigueMonitor | None = None  # fatigue, measured for every step as in harness/loop.py
+    chat_params: Any = None  # the proxy's resolved request parameters (llm/chat_params.py)
+    usage_cursor: UsageCursor | None = None  # per-line LLM usage (set in __post_init__)
+    evals: EvalBudget | None = None  # shared evaluator-call cap (harness/evals.py)
+
+    def __post_init__(self) -> None:
+        if self.usage_cursor is None:
+            self.usage_cursor = UsageCursor(self.budget)
 
     # -------------------------------------------------------------- evaluation
 
@@ -195,6 +209,9 @@ class GEPASession:
             return self.cfg.gepa.invalid_score, {"Error": "evaluation limit reached; not evaluated"}
         try:
             result = self.evaluator.evaluate(code)
+        except EvalExhausted:
+            self.over_limit_calls += 1
+            return self.cfg.gepa.invalid_score, {"Error": "evaluation limit reached; not evaluated"}
         except Exception as e:  # evaluators should not raise; never crash the run on one
             result = invalid(f"evaluator raised {type(e).__name__}: {e}")
         self._record(code, result)
@@ -225,7 +242,7 @@ class GEPASession:
             if obs.get("perseveration_items"):
                 details["perseveration_items"] = obs["perseveration_items"]
         rec = self.logger.build(agent_tokens=self.budget.agent_tokens, sleep_tokens=self.budget.sleep_tokens,
-                                **fields)
+                                **fields, **self.usage_cursor.take())
         if self.monitor is not None:
             self.monitor.observe(rec)
             rec.update(self.monitor.log_fields())
@@ -245,8 +262,13 @@ class GEPASession:
     def llm_failed(self) -> bool:
         return self.lm.consecutive_failures >= self.cfg.gepa.max_llm_failures
 
+    def billing_failed(self) -> bool:
+        return getattr(self.lm, "billing_error", None) is not None
+
     def should_stop(self, _state: Any = None) -> bool:
-        return self.budget_exhausted() or self.llm_failed() or self.next_step > self.limit_step
+        return (self.budget_exhausted() or self.llm_failed() or self.billing_failed()
+                or self.next_step > self.limit_step
+                or (self.evals is not None and self.evals.exhausted))
 
     # gepa callbacks (gepa/core/callbacks.py): track the parent of the next proposal
     def on_candidate_selected(self, event: dict) -> None:
@@ -306,6 +328,10 @@ class GEPASession:
 
 
 def stop_reason(session: GEPASession) -> str:
+    if session.billing_failed():
+        return "billing_error"
+    if session.evals is not None and session.evals.exhausted:
+        return "eval_limit"
     if session.budget_exhausted():
         return "budget_exhausted"
     if session.error:
@@ -337,7 +363,9 @@ def open_session(cfg: GEPAArmConfig, evaluator: Evaluator, budget: Budget, proxy
     )
     logger = RunLogger(out / "history.jsonl", run_id)
     monitor = FatigueMonitor(cfg.fatigue, best_known=evaluator.best_known, total_budget=budget.total_tokens)
-    return GEPASession(cfg, evaluator, budget, lm, logger, out, monitor=monitor)
+    evals = EvalBudget(cfg.max_evaluations)
+    return GEPASession(cfg, CountingEvaluator(evaluator, evals), budget, lm, logger, out,
+                       monitor=monitor, chat_params=getattr(proxy, "chat_params", None), evals=evals)
 
 
 def write_outputs(session: GEPASession, *, arm: str, run_id: str, t0: float, extra: dict | None = None) -> dict:
@@ -362,6 +390,7 @@ def write_outputs(session: GEPASession, *, arm: str, run_id: str, t0: float, ext
         "best_normalized": normalized_score(best.score, ev.best_known) if has_best else None,
         "best_step": best.step if has_best else None,
         "budget": budget.snapshot(),
+        "evaluations": session.evals.snapshot() if session.evals is not None else None,
         "llm_model": env_model,
         "config_model": cfg.model,
         "wallclock_s": round(time.monotonic() - t0, 3),
@@ -387,10 +416,25 @@ def write_outputs(session: GEPASession, *, arm: str, run_id: str, t0: float, ext
             "final_level": mon.state.level.label,
             "final_fatigue": round(mon.state.fatigue, 6),
         }
+    from types import SimpleNamespace
+
+    from harness.loop import usage_summary
+
+    billing = getattr(session.lm, "billing_error", None)
+    summary["error"] = str(billing) if billing is not None else session.error
+    called = env_model or (session.lm.model if session.lm.model != "proxy-default" else None)
+    summary.update(usage_summary(SimpleNamespace(chat_params=session.chat_params, model=called), budget, cfg))
     if extra:
         summary.update(extra)
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
+
+
+def raise_if_billing(session: GEPASession) -> None:
+    """Re-raise a billing / quota refusal after the outputs are written (stops a matrix)."""
+    billing = getattr(session.lm, "billing_error", None)
+    if billing is not None:
+        raise billing
 
 
 def run_gepa(cfg: GEPAArmConfig, evaluator: Evaluator, budget: Budget, proxy: LLMProxy,
@@ -408,4 +452,6 @@ def run_gepa(cfg: GEPAArmConfig, evaluator: Evaluator, budget: Budget, proxy: LL
         session.optimize(evaluator.seed_program(), cfg.gepa.background, new_evals=cfg.metric_calls)
     finally:
         proxy.unregister(run_id)
-    return write_outputs(session, arm=ARM_NAMES["gepa"], run_id=run_id, t0=t0)
+    summary = write_outputs(session, arm=ARM_NAMES["gepa"], run_id=run_id, t0=t0)
+    raise_if_billing(session)
+    return summary

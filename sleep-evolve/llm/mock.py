@@ -4,7 +4,8 @@ Every call reports fixed usage (prompt_tokens + completion_tokens), so budget ar
 in tests is exact. Responses come from `script` (a list consumed in order, then cycled)
 or, by default, from generators routed on a marker in the system prompt:
 
-  "sleep-phase consolidator"  -> FullSleep consolidator JSON (claims + replay programs)
+  "sleep-phase consolidator"  -> FullSleep consolidator JSON (claims, paired control/treatment
+                                 replays, one goal, no merges)
   "memory schemas"            -> schema-store JSON
   "consolidat" (other)        -> a canned Summarize block
   otherwise (agent)           -> a random program for the mock evaluator; with the awake
@@ -122,20 +123,29 @@ class MockTransport:
             {"cid": "c2", "kind": "dead_end", "text": f"{tags[0]} alone rarely beats the parent",
              "evidence": ev[:1], "approach_tags": tags[:2], "relates_to": [], "relation": "new"},
         ]
+        # Paired replays (control + treatment differing only by the claimed change).
         replays = [
-            {"cid": "c1", "program": "def construct():\n    return [0.7, 0.7, 0.7, 0.7, 0.7]\n",
-             "confirms_if": "score >= evidence score", "refutes_if": "score lower",
+            {"cid": "c1", "change": "every coordinate 0.5 -> 0.7",
+             "control": "def construct():\n    return [0.5, 0.5, 0.5, 0.5, 0.5]\n",
+             "treatment": "def construct():\n    return [0.7, 0.7, 0.7, 0.7, 0.7]\n",
              "decides": "add c1 as verified"},
         ]
         if mems:
             claims.append({"cid": "c3", "kind": "fact", "text": "Earlier memory still holds", "evidence": ev,
                            "approach_tags": [], "relates_to": [mems[0]], "relation": "supports"})
-            replays.append({"cid": "c3", "program": "def construct():\n    raise RuntimeError('probe crashed')\n",
-                            "confirms_if": "valid", "refutes_if": "invalid", "decides": f"support {mems[0]}"})
+            # crashing control: no baseline, so the treatment is never run (wasted, 1 evaluation)
+            replays.append({"cid": "c3", "change": "probe",
+                            "control": "def construct():\n    raise RuntimeError('probe crashed')\n",
+                            "treatment": "def construct():\n    return [0.7, 0.7, 0.7, 0.7, 0.7]\n",
+                            "decides": f"support {mems[0]}"})
         if len(mems) >= 2:
             claims.append({"cid": "c4", "kind": "fact", "text": "An older memory item is wrong", "evidence": ev,
                            "approach_tags": [], "relates_to": [mems[-1]], "relation": "contradicts"})
-        return json.dumps({"selected_steps": ev, "claims": claims, "replays": replays})
+        old_goal = next(iter(re.findall(r'"id": "(g[1-9]\d*)"', user)), None)
+        goals = [{"text": "Keep every coordinate near 0.7 and probe one coordinate at a time.",
+                  "replaces": old_goal}]
+        return json.dumps({"selected_steps": ev, "claims": claims, "replays": replays, "goals": goals,
+                           "merges": []})
 
     def _schemas(self, user: str) -> str:
         ids = re.findall(r'"id": "(m\d+)"', user)

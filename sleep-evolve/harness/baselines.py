@@ -34,7 +34,10 @@ sleep_policies, plus `sleep.<param>` for the parameters the arm's policy receive
 shared sleep settings it carries unused) and diffed against the shared base. Any difference outside
 `sleep.<declared param>` (and problem_id / seed, which define the pair) fails, as does a wrong
 policy, `awake_tags` not true, or an effective context cap (min of context_cap_tokens and the
-policy's own cap) that differs between arms. Per-arm `overrides` / undeclared `arm_params` in the
+policy's own cap) that differs between arms. The LLM identity is also asserted explicitly: the config
+`model`, the `llm:` block, the resolved request parameters (llm/chat_params.py: token param,
+reasoning_effort, temperature, under the shared env), `prices` and `max_dollars` must be identical
+in every arm, so agent and sleep calls of every arm get the same model and settings. Per-arm `overrides` / undeclared `arm_params` in the
 suite YAML therefore fail the check.
 
 Run order (plan_suite): wave 1 = fatigue (auto-added when a matched arm needs it) and every
@@ -56,6 +59,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from harness.config import RunConfig
+from llm.chat_params import resolve_chat_params
 from harness.metrics import llm_sleep_steps, step_records
 
 SHARED_POLICY = "full_sleep"  # the sleep_policies entry holding the shared sleep settings
@@ -125,6 +129,8 @@ class BaselinesSection(BaseModel):
         default_factory=dict, description="per-arm RunConfig overrides; anything here fails the drift check "
                                           "unless it only touches declared params (testing hook)")
     matching: MatchingConfig = Field(default_factory=MatchingConfig)
+    problems: list[int] | None = Field(None, description="default problems for run_matrix (CLI --problems wins)")
+    seeds: list[int] | None = Field(None, description="default seeds for run_matrix (CLI --seeds wins)")
 
 
 @dataclass
@@ -234,12 +240,28 @@ def base_view(suite: Suite) -> dict[str, Any]:
 _MISSING = object()
 
 
+def llm_identity(cfg: RunConfig) -> dict:
+    """Model, LLM settings and resolved request parameters of a config (identical in every arm)."""
+    try:
+        params = resolve_chat_params(cfg.model, cfg.llm, warn=False).to_dict()
+    except ValueError as e:
+        params = {"error": str(e)}
+    return {"model": cfg.model, "llm": cfg.llm.model_dump(), "resolved": params,
+            "prices": {k: v.model_dump() for k, v in sorted(cfg.prices.items())}, "max_dollars": cfg.max_dollars}
+
+
 def drift_problems(suite: Suite, cfgs: Iterable[RunConfig]) -> list[str]:
     """Every violation of the one-difference rule among `cfgs` (empty list = OK)."""
     ref = base_view(suite)
+    ref_llm = llm_identity(suite.base)
     problems: list[str] = []
     caps: dict[Any, set] = {}
     for cfg in cfgs:
+        ident = llm_identity(cfg)
+        if ident != ref_llm:
+            diff = sorted(k for k in ident if ident[k] != ref_llm.get(k))
+            problems.append(f"{cfg.baseline_arm or cfg.resolved_run_id()}: LLM settings differ from the shared base "
+                            f"({', '.join(diff)}): {ident} vs {ref_llm}")
         arm = cfg.baseline_arm
         if arm not in ARM_SPECS:
             problems.append(f"{cfg.resolved_run_id()}: not a baseline arm ({arm!r})")
