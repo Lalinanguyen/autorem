@@ -9,7 +9,7 @@
 # Conventions
 #   direction        maximize | minimize the published quantity (`value`)
 #   score_transform  how our evaluators turn `value` into a higher-is-better score:
-#                    identity (score = value) | negate (score = -value; DEVIN_TASKS ground rules)
+#                    identity (score = value) | negate (score = -value for minimization)
 #   instances        every instance AlphaEvolve reported. A run is scored against the instance whose
 #                    `params` equal the params its evaluator declares (benchmarks/evaluator_instances.py);
 #                    anything else is refused as an instance mismatch.

@@ -3312,7 +3312,7 @@ def test_live_gepa_sleep_arm_on_p36(run_dir):
 
 
 @live(pytest.mark.pastdev)
-@pytest.mark.xfail(reason="not implemented: past.dev recall arm (DEVIN_TASKS.md task 6)", strict=True)
+@pytest.mark.xfail(reason="not implemented: past.dev recall arm", strict=True)
 def test_live_pastdev_ingest_poll_and_recall_with_an_identity():
     _require_env("PASTDEV_API_KEY")
     from sleep.pastdev import PastDevPolicy  # noqa: F401  (does not exist yet)
@@ -3324,7 +3324,7 @@ def test_live_pastdev_ingest_poll_and_recall_with_an_identity():
 
 
 @live(pytest.mark.pastdev)
-@pytest.mark.xfail(reason="not implemented: past.dev recall arm (DEVIN_TASKS.md task 6)", strict=True)
+@pytest.mark.xfail(reason="not implemented: past.dev recall arm", strict=True)
 def test_live_pastdev_query_timestamp_excludes_later_steps():
     _require_env("PASTDEV_API_KEY")
     from sleep.pastdev import PastDevPolicy  # noqa: F401  (does not exist yet)
@@ -3336,7 +3336,7 @@ def test_live_pastdev_query_timestamp_excludes_later_steps():
 
 
 @live(pytest.mark.pastdev)
-@pytest.mark.xfail(reason="not implemented: past.dev recall arm (DEVIN_TASKS.md task 6)", strict=True)
+@pytest.mark.xfail(reason="not implemented: past.dev recall arm", strict=True)
 def test_live_pastdev_one_identity_per_run_and_runs_are_isolated():
     _require_env("PASTDEV_API_KEY")
     from sleep.pastdev import PastDevPolicy  # noqa: F401  (does not exist yet)

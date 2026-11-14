@@ -9,7 +9,7 @@ in place of the raw history. Sleep policies are compared at a **matched total to
 tokens and agent tokens draw from the same `Budget`.
 
 This is a scaffold: one real path end to end (problem 36 + `no_sleep`/`summarize`), with mocks for
-everything else. `DEVIN_TASKS.md` lists what remains.
+everything else.
 
 ## Setup
 
