@@ -108,10 +108,13 @@ Every block must match the parent exactly once (exact whole-line match first, th
 trailing-whitespace-only fallback). `full` (default) is the original behavior; `diff` accepts
 diffs only; `auto` (used by the `*_openai.yaml` configs) makes diffs the default and allows a
 full rewrite only with a `FULL_REWRITE_REASON:` line, which is logged and counted. A failed diff
-is an invalid step (`diff_error`, counted as fatigue sloppiness), never a crash. If the parent had
-to be truncated to fit the context cap, that step is full-rewrite only. The logged `program` is
-always the full resulting program. `edit_mode` is part of the agent, so the drift check forces it
-to be identical in every arm (GEPA arms use gepa's own proposer and ignore it).
+is an invalid step (`diff_error`, counted as fatigue sloppiness), never a crash — except that in
+`auto` mode a fenced full program in the same reply is used instead (kind `full`, `diff_error`
+records the failed diff, `metrics.edits.diff_salvaged` counts it). If the parent had to be
+truncated to fit the context cap, that step is full-rewrite only: a diff is rejected but a fenced
+program in the same reply is still used. The logged `program` is always the full resulting
+program. `edit_mode` is part of the agent, so the drift check forces it to be identical in every
+arm (GEPA arms use gepa's own proposer and ignore it).
 
 Sleep is diff-first too: replays and dream tests use control `{"base": "<program id>"}` plus
 treatment `{"diff": ...}` (`sleep/program_ref.py`), so a treatment differs from its control by

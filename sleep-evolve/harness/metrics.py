@@ -255,8 +255,8 @@ def around_steps(steps: list[dict], sleep_steps: Iterable[int], window: int, bes
 
 
 EDIT_KEYS = ("full_steps", "diff_steps", "no_code_steps", "diff_valid", "diff_apply_failures", "full_rejected",
-             "parent_truncated_steps", "diffs_forbidden_steps", "fuzzy_blocks", "diff_lines_changed_mean",
-             "diff_share", "full_with_reason", "full_rewrite_reasons")
+             "diff_salvaged", "parent_truncated_steps", "diffs_forbidden_steps", "fuzzy_blocks",
+             "diff_lines_changed_mean", "diff_share", "full_with_reason", "full_rewrite_reasons")
 SLEEP_EDIT_KEYS = tuple(f"{who}_{k}" for who in ("replay", "dream") for k in (
     "control_ref", "control_full", "treatment_diff", "treatment_full", "diff_failures", "base_missing"))
 
@@ -265,7 +265,10 @@ def edit_counts(history: Iterable[dict], edit_mode: str | None = None) -> dict:
     """Per-run edit-kind counts over agent step lines (schema: `edits` in the module docstring).
 
     diff_steps counts every reply that attempted a diff (applied or not); diff_apply_failures those
-    with a diff_error; full_rejected = full rewrites rejected in diff mode; diffs_forbidden_steps =
+    with a diff_error; full_rejected = full rewrites rejected outright by the edit protocol
+    (diff mode, or a diff-only reply on a truncated parent); diff_salvaged = steps whose diff was
+    rejected/failed but whose fenced full program was evaluated instead (auto-mode and
+    truncated-parent salvage); diffs_forbidden_steps =
     steps run as "full" because the parent did not fit (harness/loop.py) while the run's mode
     (`edit_mode`, RunConfig.edit_mode; None = inferred: diffs allowed if any step logged a mode other
     than "full") allowed diffs."""
@@ -287,7 +290,10 @@ def edit_counts(history: Iterable[dict], edit_mode: str | None = None) -> dict:
         "no_code_steps": sum(1 for h in agent if h.get("edit_kind") is None),
         "diff_valid": sum(1 for h in applied if h.get("valid")),
         "diff_apply_failures": sum(1 for h in diff if h.get("diff_error")),
-        "full_rejected": sum(1 for h in full if h.get("diff_error")),
+        # rejected vs salvaged both carry edit_kind "full" + diff_error; a rejected step's error IS
+        # the protocol error, a salvaged step's error is absent or an ordinary evaluation error
+        "full_rejected": sum(1 for h in full if h.get("diff_error") and h.get("error") == h.get("diff_error")),
+        "diff_salvaged": sum(1 for h in full if h.get("diff_error") and h.get("error") != h.get("diff_error")),
         "parent_truncated_steps": sum(1 for h in agent if h.get("parent_truncated")),
         "diffs_forbidden_steps": sum(1 for h in agent if h.get("edit_mode") == "full") if allowed else 0,
         "fuzzy_blocks": sum(int(h.get("diff_fuzzy_blocks") or 0) for h in applied),

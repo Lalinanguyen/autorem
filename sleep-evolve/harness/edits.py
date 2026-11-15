@@ -27,19 +27,22 @@ previous blocks:
      absorbs CRLF). Exactly one -> replaced; more than one -> ambiguous; none -> not found.
   The REPLACE lines are inserted verbatim. An empty SEARCH section is an error (no blind inserts).
   A result with no non-whitespace content is an error. Line endings are normalized to "\n" and the
-  parent's trailing newline is kept.
+  result always ends with one trailing newline.
 
 Edit kind (decide_edit), by mode:
   full  today's behavior exactly: the last fenced code block (extract_program), SEARCH/REPLACE ignored.
   diff  SEARCH/REPLACE only; a reply with only a fenced program is rejected.
   auto  SEARCH/REPLACE markers present -> diff (even if a fenced block is present too);
         else a fenced block -> full rewrite; else no code.
+        When the diff fails and a fenced program is also present, the program is used instead
+        (kind "full", diff_error records the failed diff) — a salvage, not an invalid step.
   In auto the PROMPT makes diffs the default (harness/loop.py AGENT_SYSTEM_AUTO): a full rewrite only
   when a diff is not feasible, with a `FULL_REWRITE_REASON: ...` line (parse_full_rewrite_reason,
   bucketed by reason_category). Full rewrites are never rejected in auto, only logged and counted.
   A step whose parent was truncated in the prompt runs with diffs forbidden (see harness/loop.py):
-  it behaves like "full", except a reply with SEARCH/REPLACE markers is rejected instead of being
-  mis-read as a program.
+  it behaves like "full": a reply with SEARCH/REPLACE markers gets the diff part rejected
+  (diff_error), but a fenced program in the same reply is still used — a full program is
+  complete and safe regardless of what the prompt showed.
 
 Error strings (EditOutcome.error, logged as `error` and, for edit-protocol failures, `diff_error`):
   "diff apply failed: SEARCH block 2 not found in parent"
@@ -48,6 +51,7 @@ Error strings (EditOutcome.error, logged as `error` and, for edit-protocol failu
   "diff apply failed: SEARCH block 1 is empty"
   "diff apply failed: the result is an empty program"
   "diff rejected: the parent was truncated in the prompt, so this step needs a full rewrite"
+  (both also appear as diff_error on a salvaged step: kind "full", code set, diff failed/ignored)
   "full rewrite rejected: edit_mode is diff, reply with SEARCH/REPLACE blocks"
   "no SEARCH/REPLACE blocks in response"                     (diff mode, nothing usable)
   "no ```python code block or SEARCH/REPLACE blocks in response"   (auto mode, nothing usable)
@@ -67,7 +71,10 @@ EDIT_MODES = ("full", "diff", "auto")
 _SEARCH = re.compile(r"^\s*<{5,9}\s*SEARCH\s*$")
 _SEP = re.compile(r"^\s*={5,9}\s*$")
 _REPLACE = re.compile(r"^\s*>{5,9}\s*REPLACE\s*$")
-_CODE_BLOCK = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL)
+# case-insensitive py-ish tags only: ```Python / ```py3 / ```python3 / ``` all give a program;
+# a ```json or ```text block is not extracted (it is not a program and must not cost an evaluation)
+_PY_BLOCK = re.compile(r"```(?:python3?|py3?)[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_CODE_BLOCK = re.compile(r"```(?:python3?|py3?)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 DIFF_FAILED = "diff apply failed"
 NO_CODE_FULL = "no ```python code block in response"
@@ -129,7 +136,7 @@ class EditBlock:
 @dataclass
 class EditOutcome:
     code: str | None                 # the FULL resulting program, or None when there is none
-    kind: Literal["full", "diff"] | None  # what the reply attempted; None = no code at all
+    kind: Literal["full", "diff"] | None  # what produced the program; with no program, what the reply attempted
     error: str | None = None         # why there is no program (None when code is set)
     diff_error: str | None = None    # edit-protocol failure (diff apply / rejected format), else None
     stats: dict = field(default_factory=dict)  # diff only: blocks, lines_changed, fuzzy_blocks
@@ -137,8 +144,7 @@ class EditOutcome:
 
 def extract_program(text: str) -> str | None:
     """Return the last fenced code block, preferring ```python blocks (the "full" edit kind)."""
-    py = re.findall(r"```(?:python|py)[ \t]*\n(.*?)```", text, re.DOTALL)
-    blocks = py or _CODE_BLOCK.findall(text)
+    blocks = _PY_BLOCK.findall(text) or _CODE_BLOCK.findall(text)
     return blocks[-1].strip() + "\n" if blocks else None
 
 
@@ -260,6 +266,9 @@ def decide_edit(text: str, parent: str, mode: EditMode, *, diffs_forbidden: bool
     markers = has_diff_markers(text)
     if diffs_forbidden:
         if markers:
+            code = extract_program(text)  # the diff is rejected; a fenced program is still usable
+            if code:
+                return EditOutcome(code, "full", None, DIFF_REJECTED_TRUNCATED)
             return EditOutcome(None, "diff", DIFF_REJECTED_TRUNCATED, DIFF_REJECTED_TRUNCATED)
         code = extract_program(text)
         return EditOutcome(code, "full" if code else None, None if code else NO_CODE_FULL)
@@ -267,6 +276,9 @@ def decide_edit(text: str, parent: str, mode: EditMode, *, diffs_forbidden: bool
         try:
             code, stats = apply_diff(parent, text)
         except DiffError as e:
+            code = extract_program(text) if mode == "auto" else None  # salvage: the reply's
+            if code:                                                  # fenced program stands alone
+                return EditOutcome(code, "full", None, str(e))
             return EditOutcome(None, "diff", str(e), str(e))
         return EditOutcome(code, "diff", None, None, stats)
     code = extract_program(text)

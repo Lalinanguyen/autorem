@@ -16,6 +16,7 @@ Returns (new_code, n_changed); n_changed == 0 means the program had no float lit
 from __future__ import annotations
 
 import io
+import math
 import random
 import tokenize
 
@@ -41,6 +42,8 @@ def perturb_program(code: str, rng: random.Random, sigma: float = 0.05) -> tuple
                 continue
             # zero gets a small absolute nudge (a relative one would leave it at zero)
             y = x * (1.0 + sigma * rng.gauss(0.0, 1.0)) if x != 0.0 else 0.1 * sigma * rng.gauss(0.0, 1.0)
+            if not math.isfinite(y):  # e.g. 1e999 overflow: repr(inf)/repr(nan) is not a valid literal
+                continue
             edits.append((tok.start[0], tok.start[1], tok.end[1], repr(float(y))))
     if not edits:
         return code, 0

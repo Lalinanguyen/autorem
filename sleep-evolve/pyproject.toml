@@ -25,8 +25,8 @@ gepa = [
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests.py"]
-python_files = ["tests.py"]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
 pythonpath = ["."]
 markers = [
     "llm: needs a real OpenAI-compatible LLM endpoint (LLM_BASE_URL/LLM_API_KEY/LLM_MODEL); skipped unless RUN_LIVE=1",

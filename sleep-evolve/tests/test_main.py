@@ -75,7 +75,7 @@ from sleep.replay import decide, edit_for, is_crash
 from sleep.scheduler import choose_mode
 from sleep.summarize import Summarize
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "tests" / "data"
 P36_DATA = DATA / "p36_alphaevolve_n26.json"
 
@@ -500,7 +500,7 @@ def test_no_module_imports_openai_outside_the_client():
     """Only llm/client.py may talk to the API, so every call is charged to the Budget."""
     offenders = []
     for path in ROOT.rglob("*.py"):
-        if ".venv" in path.parts or path in (ROOT / "llm" / "client.py", ROOT / "tests.py"):
+        if ".venv" in path.parts or path in (ROOT / "llm" / "client.py", ROOT / "tests" / "test_main.py"):
             continue
         text = path.read_text(encoding="utf-8")
         if re.search(r"^\s*(import openai|from openai\b)", text, re.M) or "chat.completions" in text:
@@ -1896,7 +1896,8 @@ def test_max_evaluations_counts_replays_and_stops_the_run(run_dir, mock_llm, moc
 # ---- agent edit formats: full rewrites and SEARCH/REPLACE diffs (harness/edits.py) --------------
 
 from harness.edits import (  # noqa: E402
-    DiffError, EditBlock, apply_blocks, apply_diff, decide_edit, has_diff_markers, parse_blocks,
+    DiffError, EditBlock, apply_blocks, apply_diff, decide_edit, extract_program, has_diff_markers,
+    parse_blocks,
 )
 from harness.loop import (  # noqa: E402
     AGENT_SYSTEM, AWAKE_HEADER_INSTRUCTIONS, TRUNCATED_PARENT_INSTRUCTION, agent_context, agent_system,
@@ -2001,6 +2002,40 @@ def test_edit_mode_gating_full_diff_auto():
     with pytest.raises(ValidationError):
         RunConfig(problem_id=0, total_token_budget=10, max_steps=1, edit_mode="patch")
     assert RunConfig(problem_id=0, total_token_budget=10, max_steps=1).edit_mode == "full"
+
+
+def test_auto_and_truncated_steps_salvage_a_fenced_program_when_the_diff_fails():
+    diff_bad = sr("    n = 999", "    n = 6")               # fails to apply
+    diff_only = sr("    n = 5", "    n = 6")
+    full = "```python\ndef construct():\n    return [0.7] * 5\n```"
+    # auto: a failed diff + a fenced program -> the program is used, the failure is logged
+    o = decide_edit(diff_bad + "\n" + full, PARENT, "auto")
+    assert o.code == "def construct():\n    return [0.7] * 5\n" and o.kind == "full"
+    assert o.error is None and o.diff_error == "diff apply failed: SEARCH block 1 not found in parent"
+    # a WORKING diff + a fenced program still takes the diff (markers win)
+    o = decide_edit(diff_only + "\n" + full, PARENT, "auto")
+    assert o.kind == "diff" and o.code == PARENT.replace("n = 5", "n = 6")
+    # malformed markers + a fenced program -> same salvage (stray marker text cannot kill a program)
+    o = decide_edit(">>>>>>> REPLACE\n" + full, PARENT, "auto")
+    assert o.kind == "full" and o.code and o.diff_error.startswith("diff apply failed: malformed")
+    # diff mode never salvages: the failed diff stays an invalid step
+    o = decide_edit(diff_bad + "\n" + full, PARENT, "diff")
+    assert o.code is None and o.kind == "diff" and "not found" in o.diff_error
+    # truncated parent: the diff part is rejected but a full program in the same reply is used
+    o = decide_edit(diff_only + "\n" + full, PARENT, "auto", diffs_forbidden=True)
+    assert o.code and o.kind == "full" and o.diff_error.startswith("diff rejected: the parent was truncated")
+    o = decide_edit(diff_only, PARENT, "auto", diffs_forbidden=True)  # diff only: still rejected
+    assert o.code is None and o.kind == "diff" and o.diff_error.startswith("diff rejected")
+
+
+def test_extract_program_accepts_case_and_version_variants_but_not_other_languages():
+    assert extract_program("```Python\nx = 1\n```") == "x = 1\n"
+    assert extract_program("```python3\nx = 1\n```") == "x = 1\n"
+    assert extract_program("```py3\nx = 1\n```") == "x = 1\n"
+    assert extract_program("```json\n{}\n```") is None
+    # prefer the python-tagged block when several fences exist
+    two = "```\nfirst\n```\n```python\nsecond\n```"
+    assert extract_program(two) == "second\n"
 
 
 def test_full_mode_prompt_is_unchanged_and_edit_prompts_explain_the_format():
@@ -3969,6 +4004,22 @@ def test_perturb_program_jitters_float_literals_only_and_is_reproducible():
     assert "# 0.5 in a comment stays" in a and "n = 5" in a and "'x=0.25'" in a
     assert perturb_program("def construct():\n    return [1, 2, 3]\n", random.Random(0)) == (
         "def construct():\n    return [1, 2, 3]\n", 0)  # no float literal: unchanged, the eval is still spent
+    # a literal that overflows to inf is left alone: repr(inf) is not valid Python
+    out, n = perturb_program("x = 1e999\n", random.Random(1))
+    compile(out, "<perturbed>", "exec")
+    assert "1e999" in out and "inf" not in out and "nan" not in out
+
+
+def test_auto_salvage_logs_a_full_step_with_diff_error_and_counts_it(run_dir, mock_llm, mock_cfg):
+    # a failed diff plus a fenced program -> the program runs, edits.diff_salvaged counts it
+    reply = sr("    n = 999", "    n = 6") + "\n```python\n" + GOOD + "```"
+    llm, _, _ = mock_llm(10_000, script=[reply])
+    s = run(mock_cfg(max_steps=1, edit_mode="auto"), TextEvaluator(), llm, NoSleep(), out_dir=run_dir)
+    h1 = hist_of(run_dir, s)[1]
+    assert h1["edit_kind"] == "full" and h1["program"] == GOOD and h1["valid"] is True
+    assert h1["diff_error"].startswith("diff apply failed") and h1["error"] is None
+    e = s["metrics"]["edits"]
+    assert e["diff_salvaged"] == 1 and e["full_rejected"] == 0 and e["diff_apply_failures"] == 0
 
 
 def test_no_sleep_extra_evals_arm_matches_the_fatigue_runs_sleep_evaluations(tmp_path, suite):
