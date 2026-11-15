@@ -16,7 +16,9 @@ class Summarize:
     name = "summarize"
 
     def __init__(self, every_n: int = 10, max_block_tokens: int = 1024, include_best_program: bool = True,
-                 sleep_max_tokens: int = 4096):
+                 sleep_max_tokens: int = 4096, **_unused):
+        # _unused: in a baseline suite every sleeping arm carries the identical shared
+        # full_sleep param block (drift check); this policy only reads its own keys.
         if every_n <= 0:
             raise ValueError("every_n must be positive")
         self.every_n = every_n
