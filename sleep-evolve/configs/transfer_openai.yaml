@@ -1,0 +1,156 @@
+# CROSS-PROBLEM TRANSFER study on the OpenAI API: gpt-5-nano, 1 seed, small budget.
+# Arms isolate the value of carried-over memory:
+#   no_sleep (floor) -> dream (REM + A/B validation, store dies with the run)
+#   -> dream_distill (same + memory_path: the store persists across problems in plan order).
+# plan_suite orders jobs problem-major and local runs are SEQUENTIAL, so dream_distill's shared
+# store accumulates 7 -> 36 -> 50 -> 59. The transfer question: does memory earned on earlier
+# problems help later ones? Answer = dream_distill vs dream delta on each problem (Q3 in
+# compare_baselines reports per-arm means; read the per-problem summaries for the ladder).
+# RUN LOCALLY ONLY — on the Modal fan-out these runs would race on the memory file.
+# Pre-flight estimate: 12 runs x (250,000 + 32,384) x $0.40/1M ~ $1.35 upper bound.
+#   uv run python -m scripts.run_matrix --config configs/transfer_openai.yaml --estimate-only
+#   uv run python -m scripts.run_matrix --config configs/transfer_openai.yaml --out-dir runs/transfer_openai
+# Needs LLM_BASE_URL=https://api.openai.com/v1, LLM_API_KEY, LLM_MODEL=gpt-5-nano.
+# Then distill what accumulated:  uv run python -m scripts.distill --memory runs/transfer_memory.json ...
+problem_id: 36
+seed: 0
+total_token_budget: 250000
+max_steps: 100000
+k_recent: 5
+max_completion_tokens: 16384
+context_cap_tokens: 8000
+awake_tags: true
+max_evaluations: null            # shared eval cap (agent steps + replays + dream tests); null = off
+
+sleep_policy: full_sleep
+sleep_policies:
+  full_sleep:
+    every_n: 10
+    consolidator_max_tokens: 8192
+    max_block_tokens: 2048
+    context_cap_tokens: null
+    awake_tags: true
+    decay: true
+    decay_factor: 0.9
+    eviction: true
+    min_strength: 0.05
+    max_items: 40
+    pressure: true
+    scheduler: true
+    plateau_window: 15
+    late_budget_fraction: 0.8
+    replay: true
+    replay_budget: 2
+    rem_replay_budget: 1
+    schema: false
+    gating: fatigue
+    timed_depth: nrem
+    max_depth: nrem_rem            # REM passes only exist with nrem_rem depth
+    respond_drowsy: true
+    min_sleep_budget_tokens: 8192
+    wake_recent_steps: 2
+    wake_min_strength: 0.1
+    # REM dreaming: arms declare `dream` / `dream_validate`; the shared settings are below.
+    dream: false                    # declared per arm (dream_unvalidated / dream turn it on)
+    dream_max: 3                    # hypotheses per REM pass
+    dream_k_sources: 6              # memory items sampled per dream call (seeded, exploration mix)
+    dream_max_tokens: 4096          # includes reasoning tokens on gpt-5*
+    dream_retries: 1
+    dream_seed: null                # null -> deterministic from the sleep step
+    dream_min_strength: 0.0
+    dream_validate: true            # declared per arm
+    dream_evals: 2                  # A/B tests per REM pass (each <= 2 eval calls, counted in sleep_evals)
+    dream_margin: null              # null -> replay_margin
+    dream_min_budget_tokens: 8192   # adaptive: below this much remaining budget, skip dreaming
+    memory_path: null               # cross-run store; see dream_distill note above
+  summarize:
+    every_n: 5                      # declared by the summarize arm
+    sleep_max_tokens: 4096
+
+baselines:
+  arms: [no_sleep, dream, dream_distill]
+  problems: [7, 36, 50, 59]      # curriculum order: store accumulates in this order
+  seeds: [0]
+  arm_params:
+    dream_distill: {memory_path: "runs/transfer_memory.json"}
+  overrides: {}
+  matching:
+    min_gap: null
+    seed_salt: random_matched
+
+metrics:
+  checkpoints: [0.1, 0.25, 0.5, 0.75, 1.0]
+  thresholds: [0.95, 0.99]
+  window: 5
+
+eval_backend: local
+eval_timeout_s: 60
+model: gpt-5-nano
+llm:
+  token_param: auto
+  reasoning_effort: low
+  temperature: null
+  reasoning_model: null
+prices:
+  gpt-5-nano: {input: 0.05, cached_input: 0.005, output: 0.40, checked: "2026-11-14",
+               source: "https://developers.openai.com/api/docs/pricing (Standard, text)"}
+  gpt-5-mini: {input: 0.25, cached_input: 0.025, output: 2.00, checked: "2026-11-14",
+               source: "https://developers.openai.com/api/docs/pricing (Standard, text)"}
+max_dollars: 3
+out_dir: runs
+
+fatigue:
+  enabled: true
+  skip_seed_step: true
+  round_digits: 6
+  load_tokens_scale: 300000
+  load_budget_fraction: 0.15
+  load_curve: linear
+  load_cap: 1.0
+  load_relief: {forget: 0.2, nrem: 0.6, nrem_rem: 0.9}
+  baseline_steps: 5
+  window: 5
+  forget_resets_baseline: false
+  improvement_min_delta: 0.0
+  calibration_floor: 0.01
+  calibration_ratio_cap: 4.0
+  calibration_invalid_gap: null
+  calibration_score_scale: null
+  calibration_min_samples: 2
+  perseveration_match: 0.5
+  perseveration_failure: no_improvement
+  perseveration_lookback: null
+  stagnation_steps_norm: 20
+  stagnant_threshold: 0.75
+  sloppiness_floor: 0.05
+  sloppiness_ratio_cap: 4.0
+  parse_failure_patterns: ["code block"]
+  timeout_patterns: ["timeout", "timed out"]
+  header_expected: auto
+  narrowing_tag_weight: 0.5
+  narrowing_similarity_weight: 0.5
+  narrowing_min_samples: 2
+  similarity_token_regex: '\w+'
+  context_soft_cap: 8000
+  bloat_cap: 1.0
+  impairment_weights: {calibration: 0.35, perseveration: 0.15, stagnation: 0.15, sloppiness: 0.15, narrowing: 0.1, bloat: 0.1}
+  renormalize_missing: true
+  load_weight: 0.4
+  impairment_weight: 0.6
+  drowsy_threshold: 0.3
+  tired_threshold: 0.5
+  exhausted_threshold: 0.75
+  hysteresis_margin: 0.05
+  wake_threshold: 0.25
+  rearm_max_steps: 20
+  grace_steps: 3
+  debt_increment: 0.1
+  debt_cap: 0.5
+  debt_relief: {forget: 0.0, nrem: 0.5, nrem_rem: 1.0}
+  debt_deepen_threshold: 1.0e-09
+  offline_default_depth: nrem
+  validation:
+    horizon_k: 5
+    auc_margin: 0.05
+    arm: no_sleep
+    min_samples: 10
