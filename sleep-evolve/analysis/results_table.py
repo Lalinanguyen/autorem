@@ -57,7 +57,7 @@ def tokens_used(s: dict) -> int | None:
 
 def evaluations(s: dict) -> int | None:
     e = s.get("evaluations") or {}
-    return e.get("total") or e.get("agent")
+    return e.get("used") or e.get("total") or e.get("agent")
 
 
 def cost_usd(s: dict) -> float | None:
