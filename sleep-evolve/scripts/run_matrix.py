@@ -4,8 +4,8 @@ Two modes, picked by the config file:
 
 1. Baseline suite (the YAML has a `baselines:` section, harness/baselines.py): problems x seeds x
    arms, in dependency order. Wave 1 = the fatigue arm (always first) and every non-matched arm; wave
-   2 = fixed_matched / random_matched, whose sleep schedules are computed from the wave-1 fatigue log
-   of the same (problem, seed). The drift assertion (all arms identical outside their declared
+   2 = fixed_matched / random_matched (sleep schedules) and no_sleep_extra_evals (extra-evaluation
+   schedule), computed from the wave-1 fatigue log of the same (problem, seed). The drift assertion (all arms identical outside their declared
    params, including model and LLM settings) runs before anything is launched.
 
    On Modal (needs the secret "sleep-evolve-llm" with LLM_BASE_URL, LLM_API_KEY, LLM_MODEL):
@@ -188,6 +188,14 @@ def _money(x: float | None) -> str:
     return f"${x:,.2f}" if abs(x * 100 - round(x * 100)) < 1e-9 or x >= 1 else f"${x:,.4f}"
 
 
+def preflight_evaluations(base: RunConfig, n_runs: int) -> dict:
+    """Evaluator-call bounds for the pre-flight printout (no effect on the refusal rules)."""
+    shared = base.sleep_policies.get("full_sleep", {})
+    cap = base.max_evaluations
+    return {"agent_per_run_max": base.max_steps + 1, "replay_budget": int(shared.get("replay_budget", 2)),
+            "max_evaluations": cap, "total_cap": None if cap is None else cap * n_runs}
+
+
 def preflight_check(base: RunConfig, n_runs: int, *, waves: dict | None = None, max_dollars: float | None = None,
                     price_per_1m: float | None = None, env_model: str | None = None,
                     log: Callable[[str], None] = print) -> dict:
@@ -210,6 +218,12 @@ def preflight_check(base: RunConfig, n_runs: int, *, waves: dict | None = None, 
     log(f"  estimate        {_money(est['cost'])} = {est['runs']} x {est['per_run_tokens']:,} tokens x "
         f"{_money(est['rate_per_1m'])} / 1M")
     log(f"  cap             {_money(cap)} ({cap_src})")
+    est["evaluations"] = evals_info = preflight_evaluations(base, n_runs)
+    log(f"  evaluations     information only (the dollar estimate is token-based): per run agent steps <= "
+        f"{evals_info['agent_per_run_max']:,}, replays <= 2 x {evals_info['replay_budget']} per sleep (control + "
+        f"treatment) + dream tests, max_evaluations "
+        f"{'uncapped' if evals_info['max_evaluations'] is None else format(evals_info['max_evaluations'], ',')}"
+        + ("" if evals_info["total_cap"] is None else f" (all runs <= {evals_info['total_cap']:,})"))
     reasons = []
     if est["cost"] is None:
         reasons.append(f"no confirmed price for model {est['model']!r}: add it to the config's `prices:` "

@@ -3,7 +3,9 @@
 The dreamer recombines memory items and step records into DREAMS: hypotheses, never facts.
 Every dream cites the memory/step ids it was recombined from, and any program-testable dream
 carries a paired A/B test (control vs treatment, the same contract as sleep/replay.py) that
-sleep/insight_validator.py runs in the sandbox before memory is touched.
+sleep/insight_validator.py runs in the sandbox before memory is touched. Tests are diff-first
+(sleep/program_ref.py): control {"base": "<program id>"} + treatment {"diff": SEARCH/REPLACE},
+full programs ({"program", "reason"} or bare strings, the original shape) only as the fallback.
 
 Parsing reuses consolidator_io.parse_json_object (fenced or bare JSON, never raises); the
 validator below tolerates missing/garbage fields the way validate_consolidation does: bad
@@ -33,6 +35,10 @@ DREAM_USER = Template("""<task>$task</task>
 $memory_items_json
 </memory>
 
+<programs note="exact text; diff only against these">
+$programs
+</programs>
+
 <steps>
 $steps_jsonl
 </steps>
@@ -55,10 +61,15 @@ Each dream's "text" is ONE sentence: causal, concrete and testable, not narratio
 names its "sources" (the memory ids and step ids it was recombined from) and gives a short
 "rationale" for why those sources suggest it.
 
-If the hypothesis is program-testable, attach a paired A/B "test": two small python programs
-that each define construct().
-  control:   a simple, deterministic baseline program WITHOUT the claimed change
-  treatment: the control with ONLY the claimed change applied
+If the hypothesis is program-testable, attach a paired A/B "test" (each side defines construct()),
+DIFF-FIRST:
+  control:   {"base": "<program id>"}: an existing program from <programs> WITHOUT the change
+  treatment: {"diff": "<<<<<<< SEARCH\\n(lines copied exactly from the control)\\n=======\\n(changed
+             lines)\\n>>>>>>> REPLACE"}: the control with ONLY the claimed change; each SEARCH must
+             match exactly one place in the control (use \\n for newlines in JSON)
+Fall back to full programs ({"program": "...", "reason": "..."}) only when no existing program fits
+(control) or a diff cannot express the change (treatment). A diff that does not apply leaves the
+dream untested.
 "Differs only by the claimed change" means: same structure, same parameters, same random seeds,
 same iteration counts, same everything else; the line(s) implementing the change are the only
 difference. Fix every random seed. Identical programs are discarded untested.
@@ -70,8 +81,8 @@ Output JSON only:
   "dreams": [{"did": "d1", "kind": "association|counterfactual|extrapolation",
               "text": "one-sentence testable hypothesis, causal and concrete",
               "sources": ["m3", "m7", "12"], "rationale": "why these sources suggest it",
-              "test": {"control": "...python defining construct()...",
-                       "treatment": "...the control with only the change applied...",
+              "test": {"control": {"base": "p12"},
+                       "treatment": {"diff": "<<<<<<< SEARCH\\n...\\n=======\\n...\\n>>>>>>> REPLACE"},
                        "change": "what differs, one line"} | null}]
 }""")
 

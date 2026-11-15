@@ -91,6 +91,35 @@ Each run writes `runs/<run_id>/history.jsonl`, `summary.json` and `best_program.
 - **Model name.** The harness calls `LLM_MODEL`. The config's `model` is recorded in the summary,
   with a warning if it differs. `serve.model` is what `infra/modal_vllm.py` deploys.
 
+## Edit formats (`edit_mode`)
+
+The agent replies with a full rewrite (a ```python block) or SEARCH/REPLACE diffs against the
+parent (`harness/edits.py`, aider/OpenEvolve format):
+
+```
+<<<<<<< SEARCH
+(lines copied exactly from the parent)
+=======
+(replacement lines)
+>>>>>>> REPLACE
+```
+
+Every block must match the parent exactly once (exact whole-line match first, then a
+trailing-whitespace-only fallback). `full` (default) is the original behavior; `diff` accepts
+diffs only; `auto` (used by the `*_openai.yaml` configs) makes diffs the default and allows a
+full rewrite only with a `FULL_REWRITE_REASON:` line, which is logged and counted. A failed diff
+is an invalid step (`diff_error`, counted as fatigue sloppiness), never a crash. If the parent had
+to be truncated to fit the context cap, that step is full-rewrite only. The logged `program` is
+always the full resulting program. `edit_mode` is part of the agent, so the drift check forces it
+to be identical in every arm (GEPA arms use gepa's own proposer and ignore it).
+
+Sleep is diff-first too: replays and dream tests use control `{"base": "<program id>"}` plus
+treatment `{"diff": ...}` (`sleep/program_ref.py`), so a treatment differs from its control by
+exactly the claimed change; full programs are a fallback with a reason. Sleep prompts show a
+capped set of exact base programs (`base_programs`, `base_program_chars`) and reference everything
+else by id. Per-step fields: `edit_mode`, `edit_kind`, `diff_blocks`, `diff_lines_changed`,
+`diff_error`, `parent_truncated`, `full_rewrite_reason`; per-run totals in `summary.metrics.edits`.
+
 ## REM dreaming and parametric learning
 
 FullSleep's REM pass (plateau / exhausted fatigue tier) can dream: `sleep/dreamer.py` samples

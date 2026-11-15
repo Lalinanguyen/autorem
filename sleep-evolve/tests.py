@@ -1862,6 +1862,334 @@ def test_load_dotenv_does_not_override_existing_env(tmp_path, monkeypatch):
     monkeypatch.delenv("SE_TEST_B")
 
 
+def test_every_line_carries_cumulative_evaluations_including_replays(run_dir, mock_llm, mock_cfg):
+    llm, _, _ = mock_llm(10**6)
+    pol = make_policy("full_sleep", {"gating": "fixed", "every_n": 4, "replay_budget": 2})
+    s = run(mock_cfg(max_steps=12), TextEvaluator(), llm, pol, out_dir=run_dir)
+    hist = hist_of(run_dir, s)
+    assert all(isinstance(h["evaluations"], int) and isinstance(h["sleep_evaluations"], int) for h in hist)
+    prev = None
+    for h in hist:
+        if prev is not None:
+            delta, sdelta = h["evaluations"] - prev["evaluations"], h["sleep_evaluations"] - prev["sleep_evaluations"]
+            if h["event"] == "step":
+                assert (delta, sdelta) == (1, 0)  # the step's own evaluation, as of its line
+            else:  # the sleep line adds exactly that sleep's replay evaluations (control + treatment)
+                assert delta == sdelta == h["details"]["replay_evaluations"] > 0
+        prev = h
+    ev = s["evaluations"]
+    assert ev["used"] == hist[-1]["evaluations"] == ev["agent_evals"] + ev["sleep_evals"] == 13 + ev["sleep_evals"]
+    assert ev["extra_evals"] == ev["extra_scheduled"] == 0
+    assert s["metrics"]["evaluations"]["sleep"] == s["metrics"]["memory"]["replay_evaluations"] == ev["sleep_evals"]
+
+
+def test_max_evaluations_counts_replays_and_stops_the_run(run_dir, mock_llm, mock_cfg):
+    llm, _, _ = mock_llm(10**6)
+    pol = make_policy("full_sleep", {"gating": "fixed", "every_n": 2, "replay_budget": 2})
+    s = run(mock_cfg(max_steps=50, max_evaluations=8), TextEvaluator(), llm, pol, out_dir=run_dir)
+    assert s["stop_reason"] == "eval_limit" and s["evaluations"]["used"] == 8
+    assert s["evaluations"]["sleep_evals"] > 0 and s["steps_completed"] < 7  # replays used part of the cap
+    assert max(h["evaluations"] for h in hist_of(run_dir, s)) <= 8
+
+
+
+# ---- agent edit formats: full rewrites and SEARCH/REPLACE diffs (harness/edits.py) --------------
+
+from harness.edits import (  # noqa: E402
+    DiffError, EditBlock, apply_blocks, apply_diff, decide_edit, has_diff_markers, parse_blocks,
+)
+from harness.loop import (  # noqa: E402
+    AGENT_SYSTEM, AWAKE_HEADER_INSTRUCTIONS, TRUNCATED_PARENT_INSTRUCTION, agent_context, agent_system,
+)
+
+PARENT = "import math\n\ndef construct():\n    n = 5\n    xs = [0.0] * n\n    return xs\n"
+
+
+def sr(search: str, replace: str) -> str:
+    """One SEARCH/REPLACE block (search/replace given without their final newline; replace "" = delete)."""
+    rep = f"{replace}\n" if replace else ""
+    return f"<<<<<<< SEARCH\n{search}\n=======\n{rep}>>>>>>> REPLACE\n"
+
+
+def test_diff_single_and_multiple_blocks_apply_in_order():
+    out, st = apply_diff(PARENT, "Rationale.\n" + sr("    xs = [0.0] * n", "    xs = [0.7] * n"))
+    assert out == PARENT.replace("[0.0]", "[0.7]")
+    assert st == {"blocks": 1, "lines_changed": 2, "fuzzy_blocks": 0}
+    reply = ("```python\n" + sr("    n = 5", "    n = 5\n    k = 2") + "```\ntext\n"
+             + sr("    k = 2\n    xs = [0.0] * n", "    xs = [0.7] * (n + k - 2)") + sr("import math\n", ""))
+    blocks = parse_blocks(reply)  # fences and prose between blocks are ignored
+    assert [len(b.search) for b in blocks] == [1, 2, 2]
+    out, st = apply_diff(PARENT, reply)  # block 2 matches text that only exists after block 1
+    assert out == "def construct():\n    n = 5\n    xs = [0.7] * (n + k - 2)\n    return xs\n"
+    assert st["blocks"] == 3 and st["lines_changed"] == 4  # 3 lines removed (import, blank, xs) + 1 added
+    assert out.endswith("\n") and has_diff_markers(reply) and not has_diff_markers(GOOD_REPLY)
+
+
+def test_diff_exact_match_first_then_trailing_whitespace_fallback_only():
+    out, st = apply_diff(PARENT, sr("    n = 5   ", "    n = 6"))  # trailing spaces in SEARCH
+    assert "    n = 6\n" in out and st["fuzzy_blocks"] == 1
+    crlf = PARENT.replace("\n", "\r\n")  # CRLF parent: normalized, then matched exactly
+    out, st = apply_diff(crlf, sr("    n = 5", "    n = 6"))
+    assert out == PARENT.replace("n = 5", "n = 6") and st["fuzzy_blocks"] == 0
+    with pytest.raises(DiffError, match="not found"):  # leading indentation is never ignored
+        apply_diff(PARENT, sr("  n = 5", "  n = 6"))
+    with pytest.raises(DiffError, match="not found"):  # nor inner whitespace
+        apply_diff(PARENT, sr("    n  = 5", "    n = 6"))
+    # exact beats fallback: "x = 1" exists exactly once, "x = 1 " (trailing space) once
+    two = "a\nx = 1\nx = 1 \nb\n"
+    assert apply_diff(two, sr("x = 1", "y"))[0] == "a\ny\nx = 1 \nb\n"
+
+
+def test_diff_zero_and_ambiguous_matches_are_errors():
+    with pytest.raises(DiffError, match=r"^diff apply failed: SEARCH block 2 not found in parent$"):
+        apply_diff(PARENT, sr("    n = 5", "    n = 6") + sr("    n = 5", "    n = 7"))  # gone after block 1
+    dup = "def construct():\n    x = 0\n    x = 0\n    return [x]\n"
+    with pytest.raises(DiffError, match=r"SEARCH block 1 matches 2 places in parent \(ambiguous\)"):
+        apply_diff(dup, sr("    x = 0", "    x = 1"))
+    with pytest.raises(DiffError, match="ambiguous"):  # ambiguous in the whitespace fallback too
+        apply_diff("x = 0 \nx = 0  \n", sr("x = 0", "y"))
+    assert apply_diff(dup, sr("    x = 0\n    return [x]", "    return [1]"))[0].count("x = 0") == 1  # more context
+
+
+def test_diff_malformed_markers_empty_search_and_empty_result():
+    bad = {
+        "missing separator": "<<<<<<< SEARCH\nx\n>>>>>>> REPLACE\n",
+        "unclosed": "<<<<<<< SEARCH\nx\n=======\ny\n",
+        "nested": "<<<<<<< SEARCH\nx\n<<<<<<< SEARCH\n=======\ny\n>>>>>>> REPLACE\n",
+        "two separators": "<<<<<<< SEARCH\nx\n=======\ny\n=======\nz\n>>>>>>> REPLACE\n",
+        "replace only": "text\n>>>>>>> REPLACE\n",
+    }
+    for name, text in bad.items():
+        with pytest.raises(DiffError, match="malformed SEARCH/REPLACE markers"):
+            parse_blocks(text)
+    with pytest.raises(DiffError, match="SEARCH block 1 is empty"):
+        apply_blocks(PARENT, [EditBlock([""], ["x = 1"])])
+    with pytest.raises(DiffError, match="empty program"):
+        apply_diff("x = 1\n", sr("x = 1", ""))
+    # a stray markdown rule outside a block is not a marker; 5..9 marker characters are accepted
+    assert parse_blocks("=======\n<<<<< SEARCH\na\n=====\nb\n>>>>>>>>> REPLACE\n") == [EditBlock(["a"], ["b"])]
+
+
+def test_edit_mode_gating_full_diff_auto():
+    diff = "RATIONALE: tweak\n" + sr("    n = 5", "    n = 6")
+    full = "```python\ndef construct():\n    return [0.7] * 5\n```"
+    both = diff + "\n" + full
+    # full: today's behavior exactly (extract_program), SEARCH/REPLACE ignored
+    o = decide_edit(diff, PARENT, "full")
+    assert (o.code, o.kind, o.error, o.diff_error) == (None, None, "no ```python code block in response", None)
+    assert decide_edit(both, PARENT, "full").code == "def construct():\n    return [0.7] * 5\n"
+    # diff: diffs only
+    o = decide_edit(full, PARENT, "diff")
+    assert o.code is None and o.kind == "full" and o.error.startswith("full rewrite rejected") and o.diff_error
+    o = decide_edit(diff, PARENT, "diff")
+    assert o.kind == "diff" and o.code == PARENT.replace("n = 5", "n = 6") and o.error is None
+    assert decide_edit("nothing", PARENT, "diff").error == "no SEARCH/REPLACE blocks in response"
+    # auto: diff markers win, else a fenced program, else nothing
+    assert decide_edit(both, PARENT, "auto").kind == "diff"
+    assert decide_edit(full, PARENT, "auto").kind == "full"
+    o = decide_edit("nothing", PARENT, "auto")
+    assert o.kind is None and "code block" in o.error and o.diff_error is None
+    o = decide_edit(sr("absent", "x"), PARENT, "auto")
+    assert o.code is None and o.kind == "diff" and o.error == o.diff_error == \
+        "diff apply failed: SEARCH block 1 not found in parent"
+    # diffs forbidden (truncated parent): a diff is rejected, a full rewrite still works
+    o = decide_edit(diff, PARENT, "auto", diffs_forbidden=True)
+    assert o.code is None and o.kind == "diff" and o.diff_error.startswith("diff rejected: the parent was truncated")
+    assert decide_edit(full, PARENT, "diff", diffs_forbidden=True).kind == "full"
+    with pytest.raises(ValueError):
+        decide_edit(full, PARENT, "patch")
+    with pytest.raises(ValidationError):
+        RunConfig(problem_id=0, total_token_budget=10, max_steps=1, edit_mode="patch")
+    assert RunConfig(problem_id=0, total_token_budget=10, max_steps=1).edit_mode == "full"
+
+
+def test_full_mode_prompt_is_unchanged_and_edit_prompts_explain_the_format():
+    assert agent_system("full", True) == AGENT_SYSTEM + AWAKE_HEADER_INSTRUCTIONS
+    assert agent_system("full", False) == AGENT_SYSTEM and "SEARCH" not in AGENT_SYSTEM
+    auto, diff = agent_system("auto", True), agent_system("diff", True)
+    for p in (auto, diff):
+        assert "<<<<<<< SEARCH" in p and ">>>>>>> REPLACE" in p and "EXACTLY" in p and "APPROACH_TAGS" in p
+        assert "Example diff" in p and "exactly one place" in p
+    assert "DIFFS ARE THE DEFAULT" in auto and "FULL_REWRITE_REASON:" in auto and "ONLY SEARCH/REPLACE" in diff
+    assert "FULL_REWRITE_REASON" not in diff
+
+
+def test_awake_header_is_parsed_before_a_diff_without_a_fence():
+    text = ("APPROACH_TAGS: lattice, refine\nEXPECTED_SCORE: 0.9\nRATIONALE: tweak n\nRELEVANT_MEMORY: m2\n"
+            + sr("RATIONALE: inside the diff", "x"))
+    assert parse_awake_header(text) == {"approach_tags": ["lattice", "refine"], "expected_score": 0.9,
+                                        "rationale": "tweak n", "relevant_memory": ["m2"]}
+
+
+def _edit_reply(body: str, expected: float = 0.9) -> str:
+    return f"APPROACH_TAGS: a, b\nEXPECTED_SCORE: {expected}\nRATIONALE: r\nRELEVANT_MEMORY: none\n{body}"
+
+
+def test_loop_logs_the_applied_program_and_a_failed_diff_is_an_invalid_step(run_dir, mock_llm, mock_cfg):
+    seed_ret = BAD.splitlines()[1]  # "    return [0.0, 0.0, 0.0, 0.0, 0.0]" (step 1's parent is always p0)
+    script = [
+        _edit_reply(sr(seed_ret, "    return [0.7, 0.7, 0.7, 0.7, 0.6]")),             # valid diff
+        _edit_reply(sr("    return [9, 9, 9, 9, 9]", "    return [0.7] * 5")),          # SEARCH not in parent
+        _edit_reply("```python\n" + GOOD + "```"),                                       # full rewrite
+        _edit_reply("I have no code this time."),                                        # nothing
+    ]
+    llm, _, transport = mock_llm(10_000, script=script)
+    ev = TextEvaluator()
+    s = run(mock_cfg(max_steps=4, awake_tags=True, edit_mode="auto"), ev, llm, NoSleep(), out_dir=run_dir)
+    assert s["steps_completed"] == 4 and s["stop_reason"] == "max_steps" and s["edit_mode"] == "auto"
+    assert s["config"]["edit_mode"] == "auto"
+    assert "SEARCH/REPLACE" in transport.calls[0][0]["content"]
+    h0, h1, h2, h3, h4 = hist_of(run_dir, s)
+    assert all(h0[k] is None for k in ("edit_mode", "edit_kind", "diff_error", "parent_truncated"))  # seed step
+    applied = BAD.replace(seed_ret, "    return [0.7, 0.7, 0.7, 0.7, 0.6]")
+    assert h1["program"] == applied == ev.calls[1]  # the FULL program was evaluated and logged
+    assert (h1["edit_mode"], h1["edit_kind"], h1["diff_blocks"], h1["diff_lines_changed"], h1["diff_error"]) == \
+        ("auto", "diff", 1, 2, None)
+    assert h1["valid"] and h1["score"] == pytest.approx(1 - 0.01 / 5) and h1["parent_truncated"] is False
+    assert h1["approach_tags"] == ["a", "b"] and h1["expected_score"] == 0.9  # header parsed before the diff
+    assert h2["valid"] is False and h2["edit_kind"] == "diff" and h2["program"] == ""
+    assert h2["error"] == h2["diff_error"] == "diff apply failed: SEARCH block 1 not found in parent"
+    assert h2["diff_blocks"] is None and h2["surprise"] == 1.0 and len(ev.calls) == 3  # not evaluated
+    assert h3["edit_kind"] == "full" and h3["program"] == GOOD and h3["valid"] and h3["diff_error"] is None
+    assert h4["edit_kind"] is None and "code block" in h4["error"] and h4["diff_error"] is None
+    e = s["metrics"]["edits"]
+    assert (e["full_steps"], e["diff_steps"], e["no_code_steps"], e["diff_valid"], e["diff_apply_failures"]) == \
+        (1, 2, 1, 1, 1)
+    assert e["diff_share"] == 0.5 and e["parent_truncated_steps"] == 0 and e["diffs_forbidden_steps"] == 0
+
+
+def test_full_mode_ignores_diffs_and_diff_mode_rejects_full_rewrites_in_the_loop(run_dir, mock_llm, mock_cfg):
+    diff = sr(BAD.splitlines()[1], "    return [0.7, 0.7, 0.7, 0.7, 0.7]")
+    llm, _, transport = mock_llm(10_000, script=[diff, GOOD_REPLY])
+    s = run(mock_cfg(max_steps=2, run_id="full"), TextEvaluator(), llm, NoSleep(), out_dir=run_dir)
+    h1, h2 = hist_of(run_dir, s)[1:]
+    assert transport.calls[0][0]["content"] == AGENT_SYSTEM  # default: today's prompt
+    assert h1["valid"] is False and h1["error"] == "no ```python code block in response" and h1["edit_kind"] is None
+    assert h1["edit_mode"] == "full" and h1["diff_error"] is None and h2["edit_kind"] == "full" and h2["valid"]
+    llm, _, transport = mock_llm(10_000, script=[GOOD_REPLY, diff])
+    s = run(mock_cfg(max_steps=2, run_id="diff", edit_mode="diff"), TextEvaluator(), llm, NoSleep(), out_dir=run_dir)
+    h1, h2 = hist_of(run_dir, s)[1:]
+    assert "ONLY SEARCH/REPLACE" in transport.calls[0][0]["content"]
+    assert h1["valid"] is False and h1["edit_kind"] == "full" and h1["diff_error"].startswith("full rewrite rejected")
+    assert h2["edit_kind"] == "diff" and h2["valid"]  # parent is p0 (p1 is invalid)
+    assert s["metrics"]["edits"]["full_rejected"] == 1
+
+
+def test_diffs_are_never_written_against_a_truncated_parent_and_the_cap_holds():
+    big = Program("p3", "def construct():\n" + "".join(f"    v{i} = {i}\n" for i in range(400)) + "    return []\n",
+                  0.5, True, "p0", 3)
+    msgs, st = agent_context("task", "", [], big, cap=1200, awake_tags=True, edit_mode="auto")
+    assert st["program_truncated"] and st["edit_mode"] == "full" and st["diffs_forbidden"]
+    assert messages_tokens(msgs) <= 1200 == st["cap"] and st["tokens"] <= 1200
+    assert "SEARCH" not in msgs[0]["content"] and msgs[0]["content"] == agent_system("full", True)
+    assert msgs[1]["content"].endswith(TRUNCATED_PARENT_INSTRUCTION) and "chars truncated" in msgs[1]["content"]
+    small = Program("p1", PARENT, 0.5, True, "p0", 1)
+    msgs, st = agent_context("task", "", [], small, cap=1200, awake_tags=True, edit_mode="auto")
+    assert not st["program_truncated"] and st["edit_mode"] == "auto" and not st["diffs_forbidden"]
+    assert PARENT in msgs[1]["content"]  # the exact parent text, so a SEARCH copy of it matches
+
+
+class LongerIsBetter(TextEvaluator):
+    """Valid programs score by length, so the best parent is the latest (longest) full rewrite."""
+
+    def evaluate(self, program):
+        r = super().evaluate(program)
+        return EvalResult(score=min(1.0, len(program) / 1e5), valid=True, side_info=r.side_info) if r.valid else r
+
+
+class BigSeed(TextEvaluator):
+    def seed_program(self):
+        return "".join(f"# pad {i}\n" for i in range(400)) + GOOD
+
+
+def test_auto_mode_long_run_with_growing_programs_forbids_diffs_on_truncated_parents(run_dir, mock_llm, mock_cfg):
+    cap = 1100
+    llm, _, transport = mock_llm(10**8, grow_lines=4, diff_rate=0.3)
+    s = run(mock_cfg(max_steps=40, k_recent=3, context_cap_tokens=cap, awake_tags=True, edit_mode="auto"),
+            LongerIsBetter(), llm, NoSleep(), out_dir=run_dir)
+    steps = [h for h in hist_of(run_dir, s) if h["event"] == "step"][1:]
+    assert len(steps) == 40 and all(h["context_tokens"] <= cap for h in steps)
+    assert max(messages_tokens(m) for m in transport.calls) <= cap
+    trunc = [h for h in steps if h["parent_truncated"]]
+    assert trunc and any(h["edit_kind"] == "diff" and not h["parent_truncated"] for h in steps)
+    assert all(h["edit_mode"] == "full" and h["edit_kind"] != "diff" for h in trunc)  # full-only step
+    # not truncated -> auto, except a step whose full-prompt rebuild happened to fit (still diff-free)
+    assert all(h["edit_mode"] == "auto" or h["edit_kind"] != "diff" for h in steps if not h["parent_truncated"])
+    e = s["metrics"]["edits"]
+    assert e["diffs_forbidden_steps"] == sum(h["edit_mode"] == "full" for h in steps) >= len(trunc)
+    assert e["parent_truncated_steps"] == len(trunc)
+    # a diff reply against a truncated parent is rejected, never applied to the truncated text
+    llm, _, _ = mock_llm(10**6, script=[sr("    return [0.7, 0.7, 0.7, 0.7, 0.7]", "    return [0.5] * 5")])
+    s = run(mock_cfg(max_steps=1, context_cap_tokens=700, edit_mode="auto", run_id="rej"), BigSeed(), llm,
+            NoSleep(), out_dir=run_dir)
+    h1 = hist_of(run_dir, s)[1]
+    assert h1["parent_truncated"] and h1["edit_mode"] == "full" and h1["edit_kind"] == "diff" and h1["valid"] is False
+    assert h1["diff_error"].startswith("diff rejected: the parent was truncated") and h1["program"] == ""
+
+
+def test_mock_auto_run_mixes_full_rewrites_valid_diffs_and_failed_diffs(run_dir, mock_llm, mock_cfg):
+    llm, _, transport = mock_llm(10**6, diff_rate=0.5, bad_diff_rate=0.25, seed=3)
+    ev = TextEvaluator()
+    pol = make_policy("full_sleep", {"gating": "fixed", "every_n": 8, "replay_budget": 1})
+    s = run(mock_cfg(max_steps=30, awake_tags=True, edit_mode="auto"), ev, llm, pol, out_dir=run_dir)
+    assert s["steps_completed"] == 30
+    hist = hist_of(run_dir, s)
+    steps = [h for h in hist if h["event"] == "step"][1:]
+    assert all(set(h) == set(FIELDS) for h in hist) and any(h["event"] == "sleep" for h in hist)
+    kinds = [h["edit_kind"] for h in steps]
+    assert kinds.count("full") > 3 and kinds.count("diff") > 3
+    failed = [h for h in steps if h["diff_error"]]
+    assert failed and all(h["valid"] is False and h["edit_kind"] == "diff" and h["program"] == "" for h in failed)
+    assert transport.bad_diff_replies == len(failed) and transport.diff_replies == kinds.count("diff")
+    by_id = {h["program_id"]: h for h in hist if h.get("program_id")}
+    for h in steps:
+        if h["edit_kind"] == "diff" and not h["diff_error"]:
+            parent = by_id[h["parent_id"]]["program"]
+            assert h["program"] != parent and h["program"].splitlines()[:-1] == parent.splitlines()[:-1]
+            assert h["program"] in ev.calls and h["valid"] and h["diff_blocks"] == 1
+    e = s["metrics"]["edits"]
+    assert e["diff_steps"] == kinds.count("diff") and e["full_steps"] == kinds.count("full")
+    assert e["diff_apply_failures"] == len(failed) and 0 < e["diff_share"] < 1
+
+
+
+def test_full_rewrite_reason_is_parsed_leniently_and_bucketed():
+    from harness.edits import parse_full_rewrite_reason, reason_category
+
+    text = ("APPROACH_TAGS: a\n**Full rewrite reason:** the change restructures most of the program\n"
+            "```python\nFULL_REWRITE_REASON: ignored inside the fence\n```")
+    assert parse_full_rewrite_reason(text) == "the change restructures most of the program"
+    assert parse_full_rewrite_reason("full-rewrite-reason = previous diff failed to apply\n```python\nx\n```") == \
+        "previous diff failed to apply"
+    assert parse_full_rewrite_reason("no reason\n```python\nx\n```") is None
+    assert parse_full_rewrite_reason("FULL_REWRITE_REASON:\n```python\nx\n```") is None
+    cats = {"the parent was truncated": "parent_truncated", "parent not shown": "parent_not_shown",
+            "my last diff did not apply": "previous_diff_failed", "restructures construct()": "restructure",
+            "felt like it": "other", None: "none"}
+    assert {r: reason_category(r) for r in cats} == cats
+
+
+def test_auto_mode_logs_and_counts_full_rewrite_reasons_without_rejecting(run_dir, mock_llm, mock_cfg):
+    full_r = "FULL_REWRITE_REASON: the change restructures most of the program\n```python\n" + GOOD + "```"
+    full_n = "```python\n" + GOOD + "```"
+    diff = sr(BAD.splitlines()[1], "    return [0.7, 0.7, 0.7, 0.7, 0.6]")
+    llm, _, t = mock_llm(10_000, script=[diff, full_r, full_n])
+    s = run(mock_cfg(max_steps=3, edit_mode="auto"), TextEvaluator(), llm, NoSleep(), out_dir=run_dir)
+    h1, h2, h3 = hist_of(run_dir, s)[1:]
+    assert "DIFFS ARE THE DEFAULT" in t.calls[0][0]["content"]
+    assert h1["edit_kind"] == "diff" and h1["full_rewrite_reason"] is None
+    assert h2["edit_kind"] == "full" and h2["valid"] and h2["full_rewrite_reason"].startswith("the change restructures")
+    assert h3["edit_kind"] == "full" and h3["valid"] and h3["full_rewrite_reason"] is None  # logged, not rejected
+    e = s["metrics"]["edits"]
+    assert e["full_with_reason"] == 1 and e["full_rewrite_reasons"] == {"restructure": 1, "none": 1}
+    # the mock gives a reason with every auto-mode full rewrite
+    llm, _, _ = mock_llm(10**6, diff_rate=0.3, seed=4)
+    s = run(mock_cfg(max_steps=12, edit_mode="auto", run_id="mockreason"), TextEvaluator(), llm, NoSleep(),
+            out_dir=run_dir)
+    e = s["metrics"]["edits"]
+    assert e["full_steps"] and e["full_with_reason"] == e["full_steps"] == e["full_rewrite_reasons"]["restructure"]
+
+
 # ================================================================================================
 # Section 4 · Memory store
 # ================================================================================================
@@ -2536,6 +2864,14 @@ def test_full_sleep_fixed_schedule_and_param_validation():
     assert fs.memory_section(50) == ""  # empty store renders nothing
 
 
+def test_sleep_call_token_caps_leave_room_for_reasoning_tokens():
+    """gpt-5* count reasoning tokens against max_completion_tokens: no sleep call uses a small fixed cap."""
+    assert FullSleep(schema=True).schemas.max_tokens == FullSleep().p["consolidator_max_tokens"] >= 8192
+    assert FullSleep(schema=True, consolidator_max_tokens=12000).schemas.max_tokens == 12000  # derived
+    assert FullSleep(schema=True, schema_max_tokens=3000).schemas.max_tokens == 3000          # explicit wins
+    assert Summarize().sleep_max_tokens >= 4096 and Summarize(sleep_max_tokens=9000).sleep_max_tokens == 9000
+
+
 def test_after_sleep_the_agent_sees_only_the_last_couple_of_pre_sleep_steps(run_dir, mock_llm, mock_cfg):
     llm, _, transport = mock_llm(10**6)
     pol = FullSleep(gating="fixed", every_n=6, wake_recent_steps=2, replay=False)
@@ -2599,6 +2935,164 @@ def test_summarize_validates_every_n_and_folds_new_steps():
         Summarize(every_n=0)
     pol = Summarize(every_n=2)
     assert pol.should_sleep(2, []) and not pol.should_sleep(3, []) and not pol.should_sleep(0, [])
+
+
+
+# ---- diff-first sleep programs: ref controls, diff treatments, fallbacks (sleep/program_ref.py) --------
+
+from sleep.program_ref import ProgramIndex, base_programs, resolve_pair, sha  # noqa: E402
+
+
+def _five(v: float) -> str:
+    return f"def construct():\n    return [{v}, {v}, {v}, {v}, {v}]\n"
+
+
+def _diff_hist(n: int = 6, pad: int = 0) -> list[dict]:
+    """Valid step records whose programs TextEvaluator can score (5-number lists), optional padding."""
+    filler = "".join(f"# note {i}: " + "x" * 60 + "\n" for i in range(pad))
+    return [{"event": "step", "step": s, "program_id": f"p{s}", "parent_id": f"p{s - 1}" if s else None,
+             "program": filler + _five(round(0.1 + 0.05 * s, 2)), "score": 0.5 + 0.01 * s, "valid": True,
+             "error": None, "delta_vs_best": 0.01 if s else None, "side_info": {"slack": s}} for s in range(n)]
+
+
+def _to07(ret_value: float) -> str:
+    return (f"<<<<<<< SEARCH\n    return [{ret_value}, {ret_value}, {ret_value}, {ret_value}, {ret_value}]\n"
+            f"=======\n    return [0.7, 0.7, 0.7, 0.7, 0.7]\n>>>>>>> REPLACE\n")
+
+
+def test_ref_control_resolves_to_the_logged_program_and_a_diff_treatment_applies(mock_llm):
+    hist = _diff_hist()
+    idx = ProgramIndex.from_records(hist)
+    assert idx.resolve_id("p3") == idx.resolve_id(3) == idx.resolve_id("step 3") == "p3"
+    assert idx.resolve_id("best") == "p5" and idx.resolve_id("p99") is None
+    body = {"claims": [{"cid": "c1", "kind": "rule", "text": "0.7 everywhere raises the score", "evidence": [3],
+                        "relation": "new"}],
+            "replays": [{"cid": "c1", "change": "-> 0.7", "control": {"base": "p3"},
+                         "treatment": {"diff": _to07(0.25)}, "decides": "add c1"}]}
+    llm, budget, t = mock_llm(10_000, script=[json.dumps(body)])
+    fs = _fs()
+    m = fs.consolidate("task", hist, llm, budget, step=6)
+    rec = m["replays"][0]
+    assert "<programs" in t.calls[0][1]["content"] and hist[5]["program"] in t.calls[0][1]["content"]
+    expected = hist[3]["program"].replace("[0.25, 0.25, 0.25, 0.25, 0.25]", "[0.7, 0.7, 0.7, 0.7, 0.7]")
+    assert (rec["control_kind"], rec["control_base"], rec["treatment_kind"], rec["treatment_base"]) == \
+        ("ref", "p3", "diff", "p3")
+    assert rec["control_sha"] == sha(hist[3]["program"]) and rec["treatment_sha"] == sha(expected)
+    assert fs.evaluator.calls[-2:] == [hist[3]["program"], expected]  # exactly these texts were evaluated
+    assert rec["diff_blocks"] == 1 and rec["diff_lines_changed"] == 2 and rec["apply_error"] is None
+    assert "control_program" not in rec and rec["treatment_diff"] == _to07(0.25)  # reconstructable, compact
+    assert rec["decision"] == "confirmed" and "wasted" not in rec
+    assert (m["replay_control_ref"], m["replay_treatment_diff"], m["replay_diff_failures"]) == (1, 1, 0)
+    assert m["base_programs_shown"][0] == "p5"  # the run best is shown in full to the consolidator
+
+
+def test_non_matching_diff_or_unknown_base_wastes_the_replay_with_the_reason(mock_llm):
+    hist = _diff_hist()
+    body = {"claims": [{"cid": "c1", "kind": "rule", "text": "r", "relation": "new"}],
+            "replays": [{"cid": "c1", "control": {"base": "p2"}, "treatment": {"diff": _to07(0.9)}},
+                        {"cid": "c1", "control": {"base": "p99"}, "treatment": {"diff": _to07(0.2)}},
+                        {"cid": "c1", "control": {"base": "p2"}, "treatment": {"diff": "<<<<<<< SEARCH\nx\n"}}]}
+    llm, budget, _ = mock_llm(10_000, script=[json.dumps(body)])
+    fs = _fs()
+    n_calls = len(fs.evaluator.calls)
+    m = fs.consolidate("task", hist, llm, budget, step=6)
+    r1, r2, r3 = m["replays"]
+    assert r1["wasted"] == r1["apply_error"] == "treatment diff apply failed: SEARCH block 1 not found in parent"
+    assert r2["wasted"] == "control base 'p99' not found in the run history"
+    assert "malformed SEARCH/REPLACE markers" in r3["wasted"]
+    assert m["replays_wasted"] == 3 and m["replay_evaluations"] == 0 and len(fs.evaluator.calls) == n_calls
+    assert m["replay_diff_failures"] == 2 and m["replay_base_missing"] == 1
+
+
+def test_full_fallback_and_the_old_full_shape_still_work(mock_llm):
+    hist = _diff_hist()
+    body = {"claims": [{"cid": "c1", "kind": "rule", "text": "r1", "relation": "new"},
+                       {"cid": "c2", "kind": "rule", "text": "r2", "relation": "new"}],
+            "replays": [{"cid": "c1", "control": {"base": "p1"},
+                         "treatment": {"program": _five(0.7), "reason": "restructures construct()"}},
+                        {"cid": "c2", "control": _five(0.2), "treatment": _five(0.7)}]}
+    llm, budget, _ = mock_llm(10_000, script=[json.dumps(body)])
+    m = _fs().consolidate("task", hist, llm, budget, step=6)
+    a, b = m["replays"]
+    assert (a["control_kind"], a["treatment_kind"], a["full_reason"]) == ("ref", "full", "restructures construct()")
+    assert a["treatment_program"] == _five(0.7) and a["decision"] == "confirmed"
+    assert (b["control_kind"], b["treatment_kind"], b["full_reason"]) == ("full", "full", None)
+    assert b["control_program"] == _five(0.2) and b["decision"] == "confirmed"  # original shape, unchanged
+    assert m["replay_treatment_full"] == 2 and m["replay_control_full"] == 1 and m["replay_control_ref"] == 1
+    assert resolve_pair(None, None, None).error.startswith("unparseable control program")
+
+
+def test_dream_tests_are_diff_first_with_fallbacks(mock_llm):
+    hist = _diff_hist()
+    idx = ProgramIndex.from_records(hist)
+    store = make_store()
+    dreams = [
+        {"did": "d1", "kind": "association", "text": "0.7 helps", "sources": ["m1"], "rationale": "r",
+         "test": {"control": {"base": "p4"}, "treatment": {"diff": _to07(0.3)}, "change": "-> 0.7"}},
+        {"did": "d2", "kind": "counterfactual", "text": "full fallback", "sources": ["m1"], "rationale": "r",
+         "test": {"control": {"program": HALF, "reason": "no logged program fits"},
+                  "treatment": {"program": GOOD, "reason": "new"}, "change": "0.5 -> 0.7"}},
+        {"did": "d3", "kind": "extrapolation", "text": "stale diff", "sources": ["m1"], "rationale": "r",
+         "test": {"control": {"base": "p4"}, "treatment": {"diff": _to07(0.9)}, "change": "x"}},
+    ]
+    ev = TextEvaluator()
+    out = validate_dreams(dreams, store, ev, step=7, max_tests=5, index=idx)
+    d1, d2, d3 = out["records"]
+    assert d1["status"] == "validated" and (d1["control_kind"], d1["treatment_kind"]) == ("ref", "diff")
+    assert d1["control_base"] == "p4" and ev.calls[0] == hist[4]["program"]
+    assert d2["status"] == "validated" and d2["control_reason"] == "no logged program fits"
+    assert d3["status"] == "untested" and d3["evaluations"] == 0
+    assert d3["decision_reason"].startswith("treatment diff apply failed")
+    assert out["evaluations"] == 4
+    # the same through FullSleep's REM pass with the mock dreamer (ref+diff, full fallback, stale diff)
+    llm, budget, t = mock_llm(10**6)
+    fs = _fs(dream=True, dream_evals=5)
+    m = fs.consolidate("task", hist, llm, budget, step=20, mode="rem")
+    kinds = [(r.get("control_kind"), r.get("treatment_kind")) for r in m["dreams"]]
+    assert kinds == [("ref", "diff"), ("full", "full"), ("ref", "diff")]
+    assert (m["dream_treatment_diff"], m["dream_treatment_full"], m["dream_diff_failures"]) == (2, 1, 1)
+    assert m["dreams"][0]["status"] == "validated" and m["dreams"][2]["status"] == "untested"
+    assert t.sleep_calls == 2 and budget.sleep_calls == 2 and budget.agent_calls == 0  # consolidator + dreamer
+
+
+def test_sleep_prompts_stay_bounded_with_many_long_programs_in_history(mock_llm):
+    """Base programs are count/char-capped and other programs are referenced by id, so neither the
+    consolidator nor the dreamer prompt grows with the history (the dreamer used to get every raw record)."""
+    sizes = {}
+    for n in (60, 400):
+        hist = _diff_hist(n, pad=40)  # ~2.8k chars per program
+        llm, budget, t = mock_llm(10**8)
+        fs = _fs(dream=True, base_programs=3, base_program_chars=9000)
+        m = fs.consolidate("task", hist, llm, budget, step=n, mode="rem")
+        consolidator = messages_tokens(t.calls[0])
+        dreamer = [c for c in t.calls if "REM-phase dreamer" in c[0]["content"]][0]
+        bases = base_programs(hist, k=3, max_chars=9000)
+        assert len(bases) == 3 and sum(len(b["program"]) for b in bases) <= 9000
+        assert all(b["program"] == hist[int(b["program_id"][1:])]["program"] for b in bases)  # exact, untruncated
+        sizes[n] = (consolidator, messages_tokens(dreamer), m["dream_prompt_tokens"])
+        assert consolidator < 12_000 and messages_tokens(dreamer) < 8_000
+        assert budget.sleep_calls == len(t.calls) == 2 and budget.sleep_tokens == 2 * 100
+    assert abs(sizes[400][0] - sizes[60][0]) < 500 and abs(sizes[400][1] - sizes[60][1]) < 500
+    # regression: a caller passing raw records straight to the Dreamer still gets a bounded prompt
+    llm, _, t = mock_llm(10**6)
+    Dreamer(seed=0, max_steps=12).dream("t", make_store(), _diff_hist(500, pad=40), llm, step=500)
+    assert messages_tokens(t.calls[0]) < 4_000 and "# note" not in t.calls[0][1]["content"]
+
+
+def test_mock_run_with_diff_first_sleep_logs_kinds_and_charges_every_sleep_call(run_dir, mock_llm, mock_cfg):
+    llm, budget, t = mock_llm(10**6, seed=2)
+    pol = make_policy("full_sleep", {"gating": "fixed", "every_n": 4, "replay_budget": 3})
+    s = run(mock_cfg(max_steps=12, awake_tags=True, edit_mode="auto"), TextEvaluator(), llm, pol, out_dir=run_dir)
+    sleeps = [h for h in hist_of(run_dir, s) if h["event"] == "sleep"]
+    assert len(sleeps) == 3 and budget.sleep_calls == t.sleep_calls >= 3
+    assert len(t.calls) == budget.agent_calls + budget.sleep_calls
+    for h in sleeps:
+        d = h["details"]
+        assert d["replay_treatment_diff"] >= 1 and d["replay_treatment_full"] >= 1 and d["replay_diff_failures"] == 1
+        assert all(r["control_kind"] == "ref" and r["control_base"] for r in d["replays"])
+    mem = s["metrics"]["memory"]
+    assert mem["replay_control_ref"] == sum(h["details"]["replay_control_ref"] for h in sleeps) >= 9
+    assert mem["replay_diff_failures"] == 3 and mem["replay_treatment_full"] == 3
 
 
 # ================================================================================================
@@ -3066,6 +3560,24 @@ def test_replay_without_fatigue_fields_uses_sleep_events():
     assert not by_step[7].baseline_ready
 
 
+
+def test_sloppiness_counts_failed_diffs_as_parse_failures():
+    from harness.fatigue import is_parse_failure
+
+    cfg = fatigue_cfg(parse_failure_patterns=["code block"])  # the shipped configs' explicit list
+    err = "diff apply failed: SEARCH block 1 not found in parent"
+    assert is_parse_failure({"error": err, "diff_error": err}, cfg)  # diff_error counts whatever the patterns
+    assert is_parse_failure({"error": err}, FatigueConfig())  # default patterns include it too
+    assert is_parse_failure({"error": "no ```python code block or SEARCH/REPLACE blocks in response"}, cfg)
+    assert not is_parse_failure({"error": "expected a list of 5 numbers"}, cfg)
+    m = FatigueMonitor(cfg)
+    for s in range(4):
+        m.observe(frec(s))
+    m.observe(dict(frec(4, valid=False, error=err), diff_error=err, program=""))
+    st = m.observe(dict(frec(5, valid=False, error=err), diff_error=err, program=""))
+    assert st.components["sloppiness"] > 0.9
+
+
 # ================================================================================================
 # Section 7 · Baseline arms
 # ================================================================================================
@@ -3074,7 +3586,9 @@ from harness.baselines import (  # noqa: E402
     ARM_SPECS, BaselinesSection, ConfigDriftError, check_drift, even_schedule, load_suite, make_suite, plan_suite,
     random_schedule, resolve_arm,
 )
-from harness.metrics import best_curve, compute_run_metrics, first_reach, llm_sleep_steps  # noqa: E402
+from harness.metrics import (  # noqa: E402
+    SLEEP_EDIT_KEYS, best_curve, compute_run_metrics, first_reach, llm_sleep_steps, step_records,
+)
 from scripts.run_matrix import run_suite_local  # noqa: E402
 
 BASELINES_CONFIG = ROOT / "configs" / "baselines_mock.yaml"
@@ -3299,8 +3813,12 @@ def test_summary_metrics_schema(matrix):
     for k in ("overall", "before_sleep", "after_sleep"):
         assert set(b[k]) == {"perseveration_rate", "invalid_rate", "calibration_error", "n"}
     assert set(m["memory"]) == {"items_added", "items_evicted", "replays_wasted", "replays_run",
-                                    "dream_calls", "dream_evaluations", "dreams_validated",
-                                    "dreams_refuted", "dreams_uncertain", "dreams_untested"}
+                                    "replay_evaluations", "dream_calls", "dream_evaluations", "dreams_validated",
+                                    "dreams_refuted", "dreams_uncertain", "dreams_untested", *SLEEP_EDIT_KEYS}
+    assert set(m["evaluations"]) == {"used", "agent", "sleep", "extra", "extra_scheduled", "limit"}
+    ev = m["evaluations"]
+    assert ev["used"] == ev["agent"] + ev["sleep"] + ev["extra"] and ev["sleep"] == m["memory"]["replay_evaluations"] \
+        + m["memory"]["dream_evaluations"]
     assert m["memory"]["items_added"] > 0
     assert _msum(matrix, "no_sleep", 0)["metrics"]["memory"]["items_added"] == 0
     assert _msum(matrix, "fixed_letta", 0)["arm"] == "fixed_letta"
@@ -3413,6 +3931,106 @@ def test_run_matrix_cli_refuses_with_exit_2_and_mock_skips_the_check(monkeypatch
     assert "pre-flight OK" in capsys.readouterr().out and ran == []
     rm._local(["--config", cfg, "--mock-llm", "--estimate-only"])
     assert "no pre-flight cost check" in capsys.readouterr().out
+
+
+def test_preflight_reports_evaluations_as_information_only():
+    import scripts.run_matrix as rm
+
+    base = load_suite(ROOT / "configs" / "pilot_openai.yaml").base
+    lines: list[str] = []
+    est = rm.preflight_check(base, 7, max_dollars=1000.0, log=lines.append)
+    capped = rm.preflight_check(base.model_copy(update={"max_evaluations": 50}), 7, max_dollars=1000.0,
+                                log=lambda m: None)
+    assert est["cost"] == capped["cost"]  # dollars stay token-based
+    line = next(x for x in lines if x.strip().startswith("evaluations"))
+    assert "information only" in line and "uncapped" in line
+    assert capped["evaluations"]["total_cap"] == 350 and est["evaluations"]["agent_per_run_max"] == base.max_steps + 1
+
+
+def test_sleep_eval_schedule_reads_cumulative_counts_or_falls_back_to_details():
+    from harness.baselines import sleep_eval_schedule
+    hist = [{"event": "step", "step": 1, "sleep_evaluations": 0}, {"event": "sleep", "step": 1, "sleep_evaluations": 3},
+            {"event": "step", "step": 2, "sleep_evaluations": 3}, {"event": "sleep", "step": 2, "sleep_evaluations": 3},
+            {"event": "sleep", "step": 4, "sleep_evaluations": 7}]
+    assert sleep_eval_schedule(hist) == [[1, 3], [4, 4]]  # a sleep that spent nothing is omitted
+    old = [{"event": "step", "step": 1}, {"event": "sleep", "step": 1, "details": {"replay_evaluations": 2,
+                                                                                    "dream_evaluations": 1}}]
+    assert sleep_eval_schedule(old) == [[1, 3]]
+
+
+def test_perturb_program_jitters_float_literals_only_and_is_reproducible():
+    from harness.perturb import perturb_program
+    code = ("def construct():\n    # 0.5 in a comment stays\n    n = 5\n    s = 'x=0.25'\n"
+            "    return [0.5, 1e-3, -0.7, 0.0, n * 0.1]\n")
+    a, na = perturb_program(code, random.Random(3), 0.05)
+    b, nb = perturb_program(code, random.Random(3), 0.05)
+    assert a == b and na == nb == 5 and a != code
+    compile(a, "<perturbed>", "exec")  # still valid Python
+    assert "# 0.5 in a comment stays" in a and "n = 5" in a and "'x=0.25'" in a
+    assert perturb_program("def construct():\n    return [1, 2, 3]\n", random.Random(0)) == (
+        "def construct():\n    return [1, 2, 3]\n", 0)  # no float literal: unchanged, the eval is still spent
+
+
+def test_no_sleep_extra_evals_arm_matches_the_fatigue_runs_sleep_evaluations(tmp_path, suite):
+    arms = ["fatigue", "no_sleep_extra_evals"]
+    s2 = make_suite(suite.base, BaselinesSection(**{**suite.section.model_dump(), "arms": arms}))
+
+    def execute(cfg, out_dir):
+        llm = LLMClient(Budget(cfg.total_token_budget), MockTransport(seed=cfg.seed, memory_boost=0.6),
+                        sleep_fn=lambda s: None)
+        return run(cfg, TextEvaluator(), llm, make_policy(cfg.sleep_policy, cfg.policy_params), out_dir=out_dir)
+
+    jobs = plan_suite(s2, [0], [0])  # passes the drift check: only sleep.extra_eval_schedule differs
+    assert [(j.arm, j.wave) for j in jobs] == [("fatigue", 1), ("no_sleep_extra_evals", 2)]
+    summaries = {s["arm"]: s for s in run_suite_local(s2, [0], [0], arms, out_dir=str(tmp_path), execute_fn=execute,
+                                                      log=lambda m: None)}
+    fat_hist = read_history(tmp_path / "p0_fatigue_s0" / "history.jsonl")
+    ext_hist = read_history(tmp_path / "p0_no_sleep_extra_evals_s0" / "history.jsonl")
+    from harness.baselines import sleep_eval_schedule
+    sched = sleep_eval_schedule(fat_hist)
+    assert sched and sum(k for _, k in sched) == summaries["fatigue"]["evaluations"]["sleep_evals"]
+    ext = summaries["no_sleep_extra_evals"]
+    assert ext["matching"]["kind"] == "evals" and ext["matching"]["scheduled_extra_evals"] == sched
+    assert ext["config"]["sleep_policies"]["no_sleep"]["extra_eval_schedule"] == sched
+    extra = [h for h in ext_hist if h["event"] == "extra_eval"]
+    reached = [(st, k) for st, k in sched if st <= ext["steps_completed"]]
+    assert len(extra) == ext["evaluations"]["extra_evals"] == sum(k for _, k in reached) > 0
+    assert ext["evaluations"]["extra_scheduled"] == sum(k for _, k in sched)
+    assert sorted({h["step"] for h in extra}) == sorted({st for st, _ in reached})  # same points as the sleeps
+    assert all(h["event"] != "sleep" for h in ext_hist)  # no LLM sleep, no memory
+    assert ext["metrics"]["sleep"]["llm_sleeps"] == 0 and len(step_records(ext_hist)) == ext["steps_completed"] + 1
+    # an improving perturbation enters the ProgramDB (and so counts for the run's best)
+    entered = [h for h in extra if h["details"]["entered_db"]]
+    assert all(h["valid"] for h in entered)
+    best_line = max((h for h in ext_hist if h["event"] in ("step", "extra_eval") and h["valid"]),
+                    key=lambda h: h["score"])
+    assert ext["best_score"] == pytest.approx(best_line["score"])
+
+
+def test_improving_perturbations_enter_the_program_db_and_can_become_the_best(run_dir, mock_llm, mock_cfg):
+    zeros = "```python\ndef construct():\n    return [0.0, 0.0, 0.0, 0.0, 0.0]\n```"
+    llm, _, _ = mock_llm(10**6, script=[zeros])  # the agent never improves on its own
+    pol = NoSleep(extra_eval_schedule=[[1, 6], [2, 6]])
+    s = run(mock_cfg(max_steps=3), TextEvaluator(), llm, pol, out_dir=run_dir)
+    hist = hist_of(run_dir, s)
+    extra = [h for h in hist if h["event"] == "extra_eval"]
+    assert len(extra) == 12 == s["evaluations"]["extra_evals"] and s["evaluations"]["used"] == 4 + 12
+    assert any(h["details"]["entered_db"] for h in extra)
+    assert "x" in s["best_program_id"]  # a perturbation (p<step>x<i>) beat every agent program
+    assert s["metrics"]["final_best_normalized"] == pytest.approx(s["best_normalized"])
+
+
+
+def test_drift_check_catches_an_arm_with_a_different_edit_mode(suite):
+    cfgs = [resolve_arm(suite, a, 0, 0) for a in ALL_ARMS]
+    with pytest.raises(ConfigDriftError, match="edit_mode = 'auto' but the shared base has 'full'"):
+        check_drift(suite, cfgs[:1] + [cfgs[1].model_copy(update={"edit_mode": "auto"})] + cfgs[2:])
+    auto = make_suite(suite.base.model_copy(update={"edit_mode": "auto"}), suite.section)
+    jobs = plan_suite(auto, [0], [0])  # the same edit_mode in every arm passes
+    assert {j.cfg.edit_mode for j in jobs} == {"auto"}
+    for name in ("debug_openai", "pilot_openai", "baselines_openai"):
+        s = load_suite(ROOT / "configs" / f"{name}.yaml")
+        assert {j.cfg.edit_mode for j in plan_suite(s, [36], [0])} == {"auto"}
 
 
 # ================================================================================================
@@ -3954,6 +4572,33 @@ def test_steps_to_95_percent_is_computed_including_not_reached():
         "budget_to_95") == (1.0, True)
 
 
+def test_eval_matched_contrast_compares_at_the_pairs_minimum_evaluation_count():
+    def cand(ev, score, event="step"):
+        return {"event": event, "step": ev, "valid": True, "score": score, "evaluations": ev}
+
+    # sleeping arm: replays (the sleep line at 6 evaluations) buy a better final score, but by 5 calls it is behind
+    sleepy = [cand(1, 0.5), cand(2, 0.5), {"event": "sleep", "step": 2, "evaluations": 6, "score": None},
+              cand(7, 0.9), cand(10, 0.95)]
+    plain = [cand(i, 0.7) for i in range(1, 6)]
+
+    def br(arm, hist, used, seed):
+        return cb.BaselineRun(SimpleNamespace(history=hist, best_known=1.0, summary={"evaluations": {"used": used}},
+                                              problem_id=0, seed=seed), arm, {"final_best_normalized": hist[-1]["score"]})
+
+    pairs = {(0, s): {"fatigue": br("fatigue", sleepy, 10, s), "no_sleep": br("no_sleep", plain, 5, s)} for s in (0, 1)}
+    c = cb.eval_matched_contrast(pairs, "fatigue", "no_sleep", n_boot=100)
+    assert c["matching"] == "evals" and c["outcome"] == cb.EVAL_OUTCOME and c["matched_evaluations"] == [5, 5]
+    assert c["diffs"] == [pytest.approx(-0.2)] * 2  # 0.5 vs 0.7 within the first 5 calls
+    tok = cb.contrast(pairs, "fatigue", "no_sleep", "final_score", n_boot=100)
+    assert tok["matching"] == "tokens" and tok["diffs"] == [pytest.approx(0.25)] * 2  # final: 0.95 vs 0.7
+    # extra_eval lines are candidates; logs without evaluation counts are skipped
+    from harness.metrics import best_at_evaluations
+    assert best_at_evaluations([cand(1, 0.2), cand(2, 0.8, "extra_eval")], 1.0, 2) == pytest.approx(0.8)
+    old = {(0, 0): {"fatigue": br("fatigue", [{"event": "step", "valid": True, "score": 0.9}], None, 0),
+                    "no_sleep": br("no_sleep", plain, 5, 0)}}
+    assert cb.eval_matched_contrast(old, "fatigue", "no_sleep", n_boot=100)["n_pairs"] == 0
+
+
 def test_compare_baselines_reports_total_cost_per_arm(tmp_path, capsys):
     root = write_paired_runs(tmp_path / "runs", effect=0.0, n_pairs=3)
     for p in root.glob("*/summary.json"):
@@ -3984,10 +4629,14 @@ def test_every_baseline_figure_is_produced_from_mock_logs(matrix, tmp_path):
 def test_summary_paragraph_and_report_are_produced_from_mock_logs(matrix, tmp_path, capsys):
     rep = cb.compare(matrix["out"], n_boot=500)
     assert rep["pairs"] == len(SEEDS) and set(rep["arms"]) == set(ALL_ARMS)
-    got = {(c["a"], c["b"], c["outcome"]) for c in rep["contrasts"]}
-    for _, a, b in cb.CONTRASTS:
+    got = {(c["a"], c["b"], c["outcome"], c["matching"]) for c in rep["contrasts"]}
+    present = [(a, b) for _, a, b in cb.CONTRASTS if a in rep["arms"] and b in rep["arms"]]
+    assert ("fatigue", "no_sleep") in present  # the mock matrix has no dream arms; only present arms are compared
+    for a, b in present:
         for o in cb.OUTCOMES:
-            assert (a, b, o) in got
+            assert (a, b, o, "tokens") in got
+        assert (a, b, cb.EVAL_OUTCOME, "evals") in got  # every contrast is also run eval-matched
+    assert len(rep["contrasts"]) == len(present) * (len(cb.OUTCOMES) + 1)
     for c in rep["contrasts"]:
         assert c["n_pairs"] == len(SEEDS) and c["win"] + c["tie"] + c["loss"] == len(SEEDS)
         assert not c["significant"] and c["verdict"] == "not significant"  # 3 pairs: p >= 0.25
@@ -3998,6 +4647,7 @@ def test_summary_paragraph_and_report_are_produced_from_mock_logs(matrix, tmp_pa
     text = capsys.readouterr().out
     assert "Interpretation guide" in text and "timing matters, beyond the amount of sleep" in text
     assert "fatigue - fixed_matched" in text and "Summary" in text
+    assert "score@evals" in text and "ev/slp" in text and "equal evaluator-call count" in rep["summary"]
     saved = json.loads((tmp_path / "rep" / "compare_baselines.json").read_text(encoding="utf-8"))
     assert saved["summary"] == rep["summary"] and (tmp_path / "rep" / "report.txt").exists()
 
@@ -4206,6 +4856,25 @@ def test_alphaevolve_report_markdown_flags_unverified_beats(tmp_path):
     assert "ShinkaEvolve" in md and "Figures skipped (--no-figures)." in md
 
 
+
+def test_compare_baselines_reports_edit_kinds_per_arm(tmp_path):
+    root = tmp_path / "runs"
+    for arm, mode in (("no_sleep", "auto"), ("fatigue", "auto")):
+        budget = Budget(4000)
+        llm = LLMClient(budget, MockTransport(seed=1, diff_rate=0.6, bad_diff_rate=0.3), sleep_fn=lambda s: None)
+        cfg = RunConfig(problem_id=0, total_token_budget=4000, max_steps=12, awake_tags=True, edit_mode=mode,
+                        baseline_arm=arm)
+        run(cfg, TextEvaluator(), llm, NoSleep(), out_dir=root)
+    rep = cb.compare(root, n_boot=50)
+    s = rep["arm_summaries"]["no_sleep"]
+    assert s["edit_mode"] == "auto" and 0 < s["diff_share_mean"] < 1 and s["diff_apply_failures_mean"] >= 0
+    assert s["full_steps_mean"] + s["diff_steps_mean"] <= 12
+    text = cb.format_report(rep)
+    assert "diff%" in text and "dfail" in text and " auto " in text
+    old = rep["_runs"][0].metrics.get("edits")
+    assert set(old) == set(__import__("harness.metrics", fromlist=["EDIT_KEYS"]).EDIT_KEYS)
+
+
 # ================================================================================================
 # Section 16 · Evaluator-call accounting (harness/evals.py) and vLLM thinking
 # ================================================================================================
@@ -4222,7 +4891,10 @@ def test_eval_budget_counts_by_role_and_caps():
     with pytest.raises(EvalExhausted):
         b.check()
     snap = b.snapshot()
-    assert snap == {"used": 3, "limit": 3, "remaining": 0, "agent_evals": 2, "sleep_evals": 1}
+    assert snap == {"used": 3, "limit": 3, "remaining": 0, "agent_evals": 2, "sleep_evals": 1, "extra_evals": 0}
+    c = EvalBudget(5)
+    c.charge("extra")
+    assert (c.extra_evals, c.agent_evals, c.used) == (1, 0, 1)  # extra evals count toward the shared cap
     assert EvalBudget().limit is None and EvalBudget().remaining is None
     EvalBudget().check()  # uncapped: never raises
     with pytest.raises(ValueError):
@@ -4318,6 +4990,40 @@ def test_strip_think_removes_reasoning_blocks():
     assert strip_think("x <think>a\nb</think> y <think>z</think> w") == "x  y  w"
     assert strip_think("no tags here") == "no tags here"
     assert strip_think("") == ""
+    # partial traces: template put <think> in the prompt / reply cut off mid-reasoning
+    assert strip_think("still reasoning ```python\nbad\n```</think>answer") == "answer"
+    assert strip_think("answer <think>reasoning cut off by max_tokens ```python\nbad") == "answer"
+
+
+def _thinking_transport(content: str):
+    """OpenAICompatTransport with a fake client whose reply `content` carries a Qwen think trace."""
+    t = OpenAICompatTransport("http://127.0.0.1:9/v1", "sk-test", "Qwen/Qwen3-8B")
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+                           usage=SimpleNamespace(prompt_tokens=50, completion_tokens=20))
+    t._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: resp)))
+    return t
+
+
+def test_thinking_content_never_reaches_extract_program_or_the_consolidator_parser():
+    from harness.loop import extract_program
+    decoy_code = "```python\ndef construct():\n    return [0.0, 0.0, 0.0, 0.0, 0.0]\n```"
+    decoy_json = json.dumps({"claims": [{"cid": "c1", "kind": "rule", "text": "decoy from the trace"}]})
+    # agent path: the trace holds a decoy code block; extract_program takes the LAST block, so a leak would win
+    real = "```python\ndef construct():\n    return [0.7, 0.7, 0.7, 0.7, 0.7]\n```"
+    llm = LLMClient(Budget(10_000), _thinking_transport(f"{real}<think>no wait: {decoy_code}</think>"),
+                    sleep_fn=lambda s: None)
+    text = llm.complete([{"role": "user", "content": "go"}], role="agent", max_tokens=100).text
+    assert "<think>" not in text and extract_program(text) == "def construct():\n    return [0.7, 0.7, 0.7, 0.7, 0.7]\n"
+    # sleep path: the trace holds a decoy JSON object, which parse_json_object would otherwise find first
+    body = json.dumps({"claims": [{"cid": "c1", "kind": "fact", "text": "real claim", "relation": "new"}],
+                       "replays": []})
+    for content in (f"<think>maybe {decoy_json}</think>{body}", f"maybe {decoy_json}</think>{body}"):
+        budget = Budget(10_000)
+        llm = LLMClient(budget, _thinking_transport(content), sleep_fn=lambda s: None)
+        fs = _fs()
+        m = fs.consolidate("task", _sleep_history(), llm, budget, step=5)
+        assert m["claims"] == 1 and fs.store.find_text("real claim") and not fs.store.find_text("decoy from the trace")
+        assert budget.sleep_calls == 1  # parsed on the first call: no retry was needed
 
 
 def test_summarize_uses_sleep_max_tokens_for_the_completion_cap():

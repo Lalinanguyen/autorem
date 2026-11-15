@@ -14,6 +14,7 @@ k_recent: 5
 max_completion_tokens: 16384    # includes reasoning tokens on reasoning models
 context_cap_tokens: 8000       # the SAME wake-context cap in every arm (no_sleep fills it with raw steps)
 awake_tags: true               # required in every arm
+edit_mode: auto                # agent replies with a full rewrite OR SEARCH/REPLACE diffs (harness/edits.py); same in every arm
 
 sleep_policy: full_sleep       # the base runs as the fatigue arm if used directly with run_one
 sleep_policies:

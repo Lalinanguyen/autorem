@@ -45,10 +45,20 @@ def strip_think(text: str) -> str:
     (or in a separate `reasoning_content` field, which we ignore — it's already out of
     `content`). Stripping keeps downstream parsers (code extraction, consolidator JSON)
     from ever seeing the reasoning trace. ChatParams.thinking is the on/off switch; this
-    function is unconditional and harmless when no tags are present."""
-    if "<think>" not in text:
+    function is unconditional and harmless when no tags are present.
+
+    Partial traces are dropped too: a stray "</think>" without its opening tag (chat templates
+    that put "<think>" in the prompt, so the reply starts mid-reasoning) drops everything up to
+    and including the last "</think>"; an unterminated "<think>" (reply cut off by max_tokens
+    while still reasoning) drops everything from it to the end."""
+    if "<think>" not in text and "</think>" not in text:
         return text
-    return _THINK_RE.sub("", text).strip()
+    out = _THINK_RE.sub("", text)
+    if "</think>" in out:
+        out = out.rsplit("</think>", 1)[1]
+    if "<think>" in out:
+        out = out.split("<think>", 1)[0]
+    return out.strip()
 
 
 @dataclass(frozen=True)

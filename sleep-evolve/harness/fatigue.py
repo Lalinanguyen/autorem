@@ -16,7 +16,9 @@ None when the log lacks the data, e.g. no EXPECTED_SCORE header):
                  as excess over the baseline fraction: (x - b) / (1 - b).
   stagnation     agent steps since the best valid score last improved / stagnation_steps_norm.
   sloppiness     rate of invalid / timeout / parse-failure steps, as a ratio to baseline
-                 -> (ratio - 1) / (sloppiness_ratio_cap - 1).
+                 -> (ratio - 1) / (sloppiness_ratio_cap - 1). A parse failure is an error matching
+                 parse_failure_patterns OR any step with a `diff_error` (failed / rejected
+                 SEARCH/REPLACE edit, harness/edits.py), whatever the configured patterns.
   narrowing      mix of (a) drop in approach-tag diversity (unique / mentions) vs baseline and
                  (b) rise in mean pairwise token-set Jaccard similarity of window programs.
   bloat          min(bloat_cap, context_tokens / context_soft_cap) / bloat_cap.
@@ -190,7 +192,8 @@ class FatigueConfig(BaseModel):
     sloppiness_floor: float = Field(0.05, gt=0, le=1, description="minimum baseline failure rate (avoids /0)")
     sloppiness_ratio_cap: float = Field(4.0, gt=1)
     parse_failure_patterns: list[str] = Field(
-        default_factory=lambda: ["code block"], description="error substrings (case-insensitive) = parse failure")
+        default_factory=lambda: ["code block", "diff apply failed"],
+        description="error substrings (case-insensitive) = parse failure; a logged diff_error always is one")
     timeout_patterns: list[str] = Field(default_factory=lambda: ["timeout", "timed out"])
     header_expected: Literal["auto", "always", "never"] = Field(
         "auto", description="missing awake header = parse failure; auto: once any step carried one")
@@ -394,6 +397,15 @@ class _Baseline:
 # ---------------------------------------------------------------------------------------------
 
 
+def is_parse_failure(record: dict, cfg: "FatigueConfig") -> bool:
+    """The step's reply could not be turned into a program: the error matches a configured
+    parse_failure_pattern, or the step logged a diff_error (failed / rejected SEARCH/REPLACE edit)."""
+    if record.get("diff_error"):
+        return True
+    err = (record.get("error") or "").lower()
+    return any(p.lower() in err for p in cfg.parse_failure_patterns)
+
+
 class FatigueMonitor:
     """Pure measurement over standard JSONL step records. See the module docstring."""
 
@@ -574,7 +586,7 @@ class FatigueMonitor:
                 gap = c.calibration_invalid_gap
 
         err = (record.get("error") or "").lower()
-        parse_fail = any(p.lower() in err for p in c.parse_failure_patterns)
+        parse_fail = is_parse_failure(record, c)
         timeout = any(p.lower() in err for p in c.timeout_patterns)
         header_missing = not tags and expected is None and (
             c.header_expected == "always" or (c.header_expected == "auto" and self._header_seen))
@@ -744,5 +756,5 @@ def replay_history(history: Iterable[dict], cfg: FatigueConfig | dict | None = N
 __all__ = [
     "COMPONENTS", "FATIGUE_FIELDS", "DepthFractions", "FatigueConfig", "FatigueMonitor", "FatigueReading",
     "FatigueState",
-    "FatigueValidationConfig", "ImpairmentWeights", "Level", "SleepDepth", "null_log_fields", "replay_history",
+    "FatigueValidationConfig", "ImpairmentWeights", "Level", "is_parse_failure", "SleepDepth", "null_log_fields", "replay_history",
 ]

@@ -12,6 +12,13 @@ step and seed always yield the same dream_source_ids.
 
 Goals are never sampled as sources; their texts go into <goals> instead. `memory_extra` items
 (dicts or MemoryItems) are shown in the memory block without joining the sampling pool.
+
+Bounded prompt: at most `max_steps` step records are shown (the last ones), and a raw JSONL record
+(one carrying `program`) is reduced to a compact consolidator_io.step_view (no program text,
+side_info/error capped). Before this, FullSleep._dream passed every raw step record of the run,
+programs, details and side_info included, so the dream prompt grew with run length (the cause of
+the ~140k-token dream-arm sleep call). Programs a dream may diff against come separately as
+`bases` (sleep/program_ref.base_programs: count- and char-capped, exact text).
 """
 
 from __future__ import annotations
@@ -20,16 +27,19 @@ import json
 import random
 from typing import Any
 
-from sleep.consolidator_io import RETRY_NOTE
+from harness.context import count_tokens
+from sleep.consolidator_io import RETRY_NOTE, step_view
 from sleep.dream_io import DREAM_SYSTEM, DREAM_USER, parse_json_object, validate_dreams
 from sleep.memory import MemoryItem, MemoryStore
+from sleep.program_ref import render_bases
 
 
 class Dreamer:
     def __init__(self, k_sources: int = 6, max_dreams: int = 3, dream_max_tokens: int = 4096,
                  retries: int = 1, seed: int = 0, min_strength: float = 0.0,
                  k_failures: int = 2, temperature_note: str = "vary widely",
-                 program_chars: int = 2000):
+                 program_chars: int = 2000, max_steps: int = 12):
+        self.max_steps = max_steps
         self.k_sources = k_sources
         self.k_failures = k_failures
         self.max_dreams = max_dreams
@@ -43,8 +53,10 @@ class Dreamer:
 
     def dream(self, task: str, store: MemoryStore, step_records: list[dict], llm, *,
               step: int, rng: random.Random | None = None,
-              memory_extra: list | None = None) -> dict:
-        """One dream call. Returns metrics; BudgetExhausted propagates out of llm.complete."""
+              memory_extra: list | None = None, bases: list[dict] | None = None) -> dict:
+        """One dream call. Returns metrics; BudgetExhausted propagates out of llm.complete.
+
+        `bases`: programs shown in full (program_ref.base_programs) for diff-first tests."""
         rng = rng if rng is not None else random.Random(f"{self.seed}.{step}")  # reproducible
         pool = [it for it in store.items.values()
                 if it.kind != "goal" and (it.strength >= self.min_strength
@@ -61,7 +73,9 @@ class Dreamer:
         )
         user = DREAM_USER.substitute(
             task=task, n_items=len(items), memory_items_json=json.dumps(items, indent=0),
-            steps_jsonl="\n".join(json.dumps(s, default=str) for s in step_records),
+            programs=render_bases(list(bases or [])),
+            steps_jsonl="\n".join(json.dumps(self._step_view(s), default=str)
+                                  for s in (list(step_records)[-self.max_steps:] if self.max_steps else [])),
             goals="\n".join(f"- [{g.id}] {g.text}" for g in goals) or "(none)",
             dream_directive=directive,
         )
@@ -77,16 +91,27 @@ class Dreamer:
             messages = messages[:2] + [{"role": "assistant", "content": resp.text[:2000]},
                                        {"role": "user", "content": RETRY_NOTE}]
         dreams, problems = validate_dreams(obj, max_dreams=self.max_dreams)
-        for d in dreams:  # bound what can reach the sandbox
+        for d in dreams:  # bound what can reach the sandbox (full programs only; refs/diffs stay exact)
             if d["test"]:
                 for k in ("control", "treatment"):
-                    if isinstance(d["test"].get(k), str):
-                        d["test"][k] = d["test"][k][: self.program_chars]
+                    v = d["test"].get(k)
+                    if isinstance(v, str):
+                        d["test"][k] = v[: self.program_chars]
+                    elif isinstance(v, dict) and isinstance(v.get("program"), str):
+                        d["test"][k] = {**v, "program": v["program"][: self.program_chars]}
         return {
             "dream_calls": calls, "n_dreams": len(dreams), "dreams": dreams,
             "dream_parse_error": err or ("; ".join(problems) if problems else None),
             "dream_source_ids": [it.id for it in sources],
+            "dream_prompt_tokens": count_tokens(DREAM_SYSTEM) + count_tokens(user),
         }
+
+    @staticmethod
+    def _step_view(s) -> dict:
+        """A raw JSONL step record (it has `program`) -> compact step_view; other dicts as given."""
+        if isinstance(s, dict) and "program" in s:
+            return step_view(s, {})
+        return s if isinstance(s, dict) else {"step": s}
 
     # ---- source sampling -----------------------------------------------------------
     def _sample_sources(self, pool: list[MemoryItem], step: int, rng: random.Random) -> list[MemoryItem]:

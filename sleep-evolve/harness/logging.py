@@ -13,9 +13,18 @@ Line schema (every key always present):
   agent_tokens   int    CUMULATIVE agent tokens charged so far in the run
   sleep_tokens   int    CUMULATIVE sleep tokens charged so far in the run
   wallclock      float  seconds since run start
-  event          "step" | "sleep"
-  details        dict   evaluator details (step) or {"policy", "block"} (sleep)
+  event          "step" | "sleep" | "extra_eval"
+                 extra_eval: one perturbation evaluation of the no_sleep extra_evals control (harness/
+                 perturb.py), written after the step it follows; program/score/valid/parent_id filled,
+                 details {"entered_db", "perturbed_literals"}. Not an agent step: step_records() and the
+                 agent's recent window skip it; best-so-far curves include it (harness/metrics.py)
+  details        dict   evaluator details (step) or {"policy", "block", ...} (sleep; FullSleep adds
+                        replay/dream records with their diff-first edit kinds, sleep/program_ref.py)
   side_info      dict   EvalResult.side_info: actionable evaluator diagnostics ({} for sleep events)
+  evaluations        int | null  CUMULATIVE evaluator calls so far in the run, every role (agent steps,
+                                 replays, dream tests, extra evals; harness/evals.py), as of this line
+  sleep_evaluations  int | null  CUMULATIVE sleep-role evaluator calls (replays + dream tests) so far
+                                 (null for writers without an EvalBudget)
 
 Awake / sleep metrics (always present; null when the policy or event does not produce them):
   approach_tags     list[str] | null  step: tags from the agent's APPROACH_TAGS header line
@@ -32,6 +41,22 @@ Awake / sleep metrics (always present; null when the policy or event does not pr
   items_added       int | null        sleep: memory items created
   items_evicted     int | null        sleep: memory items evicted
   replays_wasted    int | null        sleep: replays that decided no memory edit
+
+Agent edits (harness/edits.py; loop agent step lines only; null on the seed step, sleep / extra_eval
+lines and in writers that do not use the loop's agent, e.g. the GEPA arms):
+  edit_mode          "full"|"diff"|"auto"|null  the mode in force for this step: RunConfig.edit_mode,
+                                      or "full" when the parent had to be truncated (diffs forbidden)
+  edit_kind          "full"|"diff"|null  what the reply attempted (a failed diff is still "diff");
+                                      null = no program in the reply
+  diff_blocks        int | null       diff: SEARCH/REPLACE blocks applied (null if not applied)
+  diff_lines_changed int | null       diff: lines removed + added between parent and result (difflib)
+  diff_fuzzy_blocks  int | null       diff: blocks matched only by the trailing-whitespace fallback
+  diff_error         str | null       edit-protocol failure: diff apply failed / rejected format (the
+                                      same text is in `error`; the step is invalid)
+  parent_truncated   bool | null      the parent program shown to the agent was truncated (context cap)
+  full_rewrite_reason str | null    full: the reply's FULL_REWRITE_REASON line (asked for in auto mode; harness/edits.py
+                                      parse_full_rewrite_reason), null when absent or not a full rewrite
+  `program` is always the FULL resulting program (the diff already applied), or "" without one.
 
 Fatigue (harness/fatigue.py; every arm, every line; null when fatigue is disabled or the writer,
 e.g. a GEPA arm, does not run the monitor). Step lines carry the state observed at that step plus
@@ -82,12 +107,16 @@ from harness.fatigue import FATIGUE_FIELDS
 USAGE_FIELDS = ("llm_calls", "llm_prompt_tokens", "llm_completion_tokens", "llm_cached_tokens",
                 "llm_reasoning_tokens")
 
+EDIT_FIELDS = ("edit_mode", "edit_kind", "diff_blocks", "diff_lines_changed", "diff_fuzzy_blocks", "diff_error",
+               "parent_truncated", "full_rewrite_reason")
+
 FIELDS = (
     "run_id", "step", "parent_id", "program_id", "program", "score", "valid", "error",
     "delta_vs_best", "agent_tokens", "sleep_tokens", "wallclock", "event", "details", "side_info",
     "approach_tags", "expected_score", "rationale", "relevant_memory", "surprise", "perseveration_hit",
     "context_tokens", "pressure", "sleep_mode", "block_tokens", "items_added", "items_evicted",
-    "replays_wasted",
+    "replays_wasted", "evaluations", "sleep_evaluations",
+    *EDIT_FIELDS,
     *FATIGUE_FIELDS,
     *USAGE_FIELDS,
 )

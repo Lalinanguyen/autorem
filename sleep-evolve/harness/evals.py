@@ -9,7 +9,9 @@ Budget.
 Semantics (deliberately stricter than the token Budget, which tolerates one-call overshoot):
   1. Before a call: check() raises EvalExhausted when the limit is already reached, so
      `used` never exceeds `limit`.
-  2. After a call: charge() records it under a role ("agent" | "sleep") for reporting.
+  2. After a call: charge() records it under a role for reporting: "agent" (agent steps),
+     "sleep" (replays, dream tests) or "extra" (the no_sleep extra_evals control's perturbation
+     evals, harness/perturb.py). All three count toward `used` and the cap.
 EvalExhausted propagates like BudgetExhausted: out of evaluate(), through the sleep
 pipeline, and the loop stops the run with stop_reason "eval_limit".
 """
@@ -31,11 +33,12 @@ class EvalBudget:
         self.limit = None if limit is None else int(limit)
         self.agent_evals = 0
         self.sleep_evals = 0
+        self.extra_evals = 0
         self._lock = threading.Lock()
 
     @property
     def used(self) -> int:
-        return self.agent_evals + self.sleep_evals
+        return self.agent_evals + self.sleep_evals + self.extra_evals
 
     @property
     def remaining(self) -> int | None:
@@ -53,12 +56,14 @@ class EvalBudget:
         with self._lock:
             if role == "sleep":
                 self.sleep_evals += 1
+            elif role == "extra":
+                self.extra_evals += 1
             else:
                 self.agent_evals += 1
 
     def snapshot(self) -> dict:
         return {"used": self.used, "limit": self.limit, "remaining": self.remaining,
-                "agent_evals": self.agent_evals, "sleep_evals": self.sleep_evals}
+                "agent_evals": self.agent_evals, "sleep_evals": self.sleep_evals, "extra_evals": self.extra_evals}
 
 
 class CountingEvaluator:

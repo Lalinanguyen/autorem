@@ -13,6 +13,9 @@ else shrinks in this order until the context fits:
   2. trim the parent's side_info (halve its char budget, down to nothing)
   3. drop memory lines from the end (memory is rendered strongest-first)
   4. truncate the parent program (head + tail with a marker)
+The parent is truncated only when 1-3 are exhausted. stats["program_truncated"] reports it (logged as
+`parent_truncated`); in diff/auto edit mode harness/loop.py then forbids diffs for that step, because
+a SEARCH/REPLACE block needs the exact parent (see harness/loop.py, agent_context).
 """
 
 from __future__ import annotations

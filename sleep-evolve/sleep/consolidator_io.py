@@ -4,6 +4,13 @@ robust JSON parsing, history view.
 The history view tolerates records that lack awake fields (approach_tags, expected_score,
 rationale, surprise, perseveration_hit): GEPA and other loops pass JSONL history they wrote
 themselves. Every per-step field is length-capped, so the prompt is bounded.
+
+Diff-first replays (sleep/program_ref.py): the <programs> block shows a FEW programs in full, exact
+text (the run best plus notable window steps; count- and char-capped by FullSleep, never truncated)
+so the consolidator can write a replay as a reference control {"base": "<program id>"} plus a
+SEARCH/REPLACE treatment {"diff": ...}. Every other program appears only by id in the step views.
+Full control/treatment programs remain the fallback (with a reason), and the original bare-string
+shape still parses.
 """
 
 from __future__ import annotations
@@ -31,9 +38,13 @@ CONSOLIDATOR_USER = Template("""<task>$task</task>
 $memory_items_json
 </memory>
 
+<programs note="exact text; diff only against these">
+$programs
+</programs>
+
 <history since_step="$last_sleep_step" to_step="$step">
 $steps_jsonl
-<!-- per step: id, approach_tags, expected_score, rationale, actual score, valid,
+<!-- per step: id, program_id, approach_tags, expected_score, rationale, actual score, valid,
      delta_vs_best, surprise, side_info (violations, overlaps, slack, errors),
      perseveration_hit, program diff summary -->
 </history>
@@ -57,9 +68,20 @@ Also list existing memory items that the new evidence bears on (supports or cont
 
 STEP 3 · PLAN REPLAYS (paired A/B tests)
 For up to $replay_budget claims that are both decision-relevant and unverified, write a PAIRED
-test: two small programs that each define construct().
-  control:   a simple, deterministic baseline program WITHOUT the claimed change
-  treatment: the control with ONLY the claimed change applied
+test: a control and a treatment that each define construct(). DIFF-FIRST:
+  control:   {"base": "<program id>"}: an EXISTING program WITHOUT the claimed change, by id (the
+             run best or an evidence step's program from <programs>; any logged program_id works)
+  treatment: {"diff": "SEARCH/REPLACE blocks"}: the control with ONLY the claimed change, as edit
+             blocks applied to the control's exact text:
+<<<<<<< SEARCH
+(lines copied EXACTLY from the control program in <programs>)
+=======
+(the changed lines)
+>>>>>>> REPLACE
+             Each SEARCH must match exactly one place in the control. Use \\n for newlines in JSON.
+Fall back to full programs only when needed: a full control {"program": "...", "reason": "..."} when
+no existing program fits, a full treatment {"program": "...", "reason": "..."} only when a diff
+cannot express the change. A diff that does not apply, or an unknown base id, wastes the replay.
 "Differs only by the claimed change" means: same structure, same parameters, same random seeds,
 same iteration counts, same everything else; the line(s) implementing the change are the only
 difference. Fix every random seed. Identical programs are discarded unscored.
@@ -89,8 +111,8 @@ Output JSON only:
               "evidence": [step ids], "approach_tags": [...],
               "relates_to": [memory ids], "relation": "new|supports|contradicts"}],
   "replays": [{"cid": "c1", "change": "one line: what the treatment changes",
-               "control": "...python defining construct()...",
-               "treatment": "...the control with only the change applied...",
+               "control": {"base": "p12"},
+               "treatment": {"diff": "<<<<<<< SEARCH\\n...\\n=======\\n...\\n>>>>>>> REPLACE"},
                "decides": "add c1 as verified | refute m7 | ..."}],
   "goals": [{"text": "one sentence", "replaces": "g2" or null}],
   "merges": [{"ids": ["m3", "m7"], "text": "one combined statement"}]
@@ -256,6 +278,7 @@ def step_view(h: dict, programs: dict[str, str], *, side_info_chars: int = 240, 
 
     return {
         "id": h.get("step"),
+        "program_id": h.get("program_id"),
         "approach_tags": h.get("approach_tags") or [],
         "expected_score": rnd(h.get("expected_score")),
         "rationale": (h.get("rationale") or "")[:text_chars] or None,

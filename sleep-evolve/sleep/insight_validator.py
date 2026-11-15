@@ -23,13 +23,20 @@ provenance trail. Store mutation happens only through MemoryStore.apply_edits.
 from __future__ import annotations
 
 from sleep.memory import Edit, MemoryStore, normalize_tags  # MemoryStore used for typing only
+from sleep.program_ref import ProgramIndex, pair_record, resolve_pair
 from sleep.replay import _evaluate, _usable, decide, is_program, same_program
 
 
 def validate_dreams(dreams: list[dict], store: MemoryStore, evaluator, *,
                     step: int, max_tests: int, margin: float = 1e-3,
-                    rel_tol: float = 1e-6) -> dict:
+                    rel_tol: float = 1e-6, index: ProgramIndex | None = None,
+                    program_chars: int = 4000) -> dict:
     """Test up to `max_tests` dreams' A/B tests and apply the resulting edits to `store`.
+
+    Tests are resolved by sleep/program_ref.resolve_pair: a ref control ({"base": id}) needs `index`
+    (the run history's ProgramIndex), a diff treatment is applied to the resolved control; an
+    unresolvable ref / non-applying diff leaves the dream untested with that reason (no evaluator
+    call). Each record carries program_ref.pair_record fields (edit kinds, base, diff stats, error).
 
     Returns {"records", "validated", "refuted", "uncertain", "untested", "evaluations",
     "edits_applied", "edits"}. evaluator=None skips all testing (every dream is untested,
@@ -54,10 +61,17 @@ def validate_dreams(dreams: list[dict], store: MemoryStore, evaluator, *,
         test = d.get("test")
         control = test.get("control") if isinstance(test, dict) else None
         treatment = test.get("treatment") if isinstance(test, dict) else None
+        res = None
+        if isinstance(test, dict):
+            res = resolve_pair(control, treatment, index)
+            rec.update(pair_record(res, full_chars=program_chars))
+            control, treatment = res.control, res.treatment
         if evaluator is None:
             rec["decision_reason"] = "no evaluator bound"
         elif test is None:
             rec["decision_reason"] = "no test attached"
+        elif res is not None and res.error:
+            rec["decision_reason"] = res.error
         elif not is_program(control):
             rec["decision_reason"] = "unparseable control program"
         elif not is_program(treatment):

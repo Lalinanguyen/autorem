@@ -26,6 +26,11 @@ happened (on_sleep / on_deferred), and only then is the step line written, so it
 the observed fatigue plus sleep_triggered / sleep_deferred / sleep_depth. Line order in the
 JSONL is unchanged (step line, then its sleep line).
 
+Every line also carries the CUMULATIVE evaluator-call counts `evaluations` (all roles) and
+`sleep_evaluations` (harness/evals.py); summary.json["evaluations"] has the final per-role totals.
+A policy with `extra_evals_after(step)` (NoSleep's eval-matched control) gets that many perturbation
+evaluations of the step's parent after the step (event "extra_eval"; improving ones enter the ProgramDB).
+
 Every line carries the LLM usage since the previous line (harness/logging.py USAGE_FIELDS).
 summary.json also carries `usage` (Budget.usage_breakdown(): per role and total, with cached and
 reasoning tokens), `llm_params` (the resolved request parameters, llm/chat_params.py) and `cost`
@@ -36,7 +41,18 @@ outputs are written, then the error is re-raised so a matrix stops instead of la
 
 summary.json carries `metrics` (harness/metrics.py: normalized score at budget checkpoints, budget to
 reach 95%/99%, sleep counts and tokens, behavior before/after sleeps, fatigue curve, memory
-diagnostics) and `arm` (RunConfig.baseline_arm, else the policy name).
+diagnostics, edit kinds), `arm` (RunConfig.baseline_arm, else the policy name) and `edit_mode`.
+
+Edit formats (RunConfig.edit_mode, harness/edits.py; the same in every arm): "full" = the complete
+program in a fenced block (the original behavior, prompt unchanged); "diff" = SEARCH/REPLACE blocks
+against the parent shown; "auto" = either. The logged `program` is always the full resulting program.
+Parent-truncation policy: build_context truncates the parent only as the LAST resort (after recent
+steps, side_info and memory are gone). A diff needs the exact parent, so when the parent had to be
+truncated in diff/auto mode, that step is rebuilt with the (shorter) "full" system prompt plus a note
+that the parent did not fit and a complete program is required, and a SEARCH/REPLACE reply is rejected
+(invalid step, `diff_error`). The step logs edit_mode "full"; parent_truncated is whether the parent
+actually shown was truncated (the rebuild may just fit). The context cap still holds (both builds go
+through build_context).
 """
 
 from __future__ import annotations
@@ -56,9 +72,13 @@ from harness.config import RunConfig
 from harness.context import build_context, count_tokens
 from harness.evals import CountingEvaluator, EvalBudget, EvalExhausted
 from harness.cost import cost_block, price_table
+from harness.edits import (  # noqa: F401 (extract_program re-exported)
+    decide_edit, extract_program, first_marker_offset, parse_full_rewrite_reason,
+)
 from harness.fatigue import FatigueMonitor, SleepDepth
 from harness.logging import RunLogger, UsageCursor
 from harness.metrics import compute_run_metrics
+from harness.perturb import perturb_program
 from harness.program_db import Program, ProgramDB
 from llm.chat_params import BillingError
 from llm.client import LLMClient
@@ -73,6 +93,58 @@ AGENT_SYSTEM = (
     "with a brief rationale, then the complete program in a single ```python code block."
 )
 
+_EDIT_FORMAT = (
+    "<<<<<<< SEARCH\n"
+    "(lines copied EXACTLY from the parent program, same indentation)\n"
+    "=======\n"
+    "(the new lines that replace them)\n"
+    ">>>>>>> REPLACE\n"
+)
+_EDIT_EXAMPLE = (
+    "Example diff:\n"
+    "<<<<<<< SEARCH\n"
+    "    n_iters = 100\n"
+    "=======\n"
+    "    n_iters = 400\n"
+    ">>>>>>> REPLACE\n"
+)
+_EDIT_RULES = (
+    "Each SEARCH section must copy whole lines exactly, character for character, from the parent program "
+    "shown, and must match exactly one place in it. Blocks are applied in order; you may use several. "
+    "An empty REPLACE section deletes the lines."
+)
+
+AGENT_SYSTEM_AUTO = (
+    "You are an expert research engineer improving a program in an evolutionary search. "
+    "Each program defines construct(), which returns a candidate solution that an "
+    "automatic evaluator scores (higher is better). Propose ONE improved program. Reply "
+    "with a brief rationale, then your edit. DIFFS ARE THE DEFAULT: reply with one or more "
+    "SEARCH/REPLACE blocks that edit the parent program:\n"
+    + _EDIT_FORMAT + _EDIT_RULES + "\n" + _EDIT_EXAMPLE +
+    "Write the complete program in a single ```python code block (a full rewrite) ONLY when a diff is "
+    "not feasible: the parent program is not shown or was truncated, the change restructures most of "
+    "the program, or your previous diff attempt failed to apply. A full rewrite must be preceded by one "
+    "line:\nFULL_REWRITE_REASON: <why a diff was not feasible>\n"
+    "Do not mix the two formats in one reply."
+)
+
+AGENT_SYSTEM_DIFF = (
+    "You are an expert research engineer improving a program in an evolutionary search. "
+    "Each program defines construct(), which returns a candidate solution that an "
+    "automatic evaluator scores (higher is better). Propose ONE improved program. Reply "
+    "with a brief rationale, then ONLY SEARCH/REPLACE blocks that edit the parent program:\n"
+    + _EDIT_FORMAT + _EDIT_RULES + " A complete program without SEARCH/REPLACE blocks is rejected.\n"
+    + _EDIT_EXAMPLE
+)
+
+AGENT_SYSTEMS = {"full": AGENT_SYSTEM, "auto": AGENT_SYSTEM_AUTO, "diff": AGENT_SYSTEM_DIFF}
+
+TRUNCATED_PARENT_INSTRUCTION = (
+    "Write an improved version of the parent program. The parent did not fit the context in full, "
+    "so SEARCH/REPLACE diffs are not accepted this step: reply with the complete program in a "
+    "single ```python code block."
+)
+
 AWAKE_HEADER_INSTRUCTIONS = (
     "\n\nBefore the code block, write these four header lines exactly:\n"
     "APPROACH_TAGS: 2-5 short lowercase tags naming your approach, comma-separated "
@@ -81,10 +153,11 @@ AWAKE_HEADER_INSTRUCTIONS = (
     "RATIONALE: one sentence on why it should work\n"
     "RELEVANT_MEMORY: ids of memory items (like m3) that informed it, or none"
 )
+AWAKE_HEADER_INSTRUCTIONS_EDITS = AWAKE_HEADER_INSTRUCTIONS.replace(
+    "Before the code block,", "Before the code block or the first SEARCH/REPLACE block,")
 
 SLEEP_TOP_LEVEL = ("pressure", "sleep_mode", "items_added", "items_evicted", "replays_wasted")
 
-_CODE_BLOCK = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL)
 _HEADER = re.compile(
     r"^[ \t>*_#-]*(APPROACH[ _]TAGS|EXPECTED[ _]SCORE|RATIONALE|RELEVANT[ _]MEMORY)[*_ \t]*[:=][ \t]*(.*)$",
     re.IGNORECASE | re.MULTILINE,
@@ -92,21 +165,17 @@ _HEADER = re.compile(
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
-def extract_program(text: str) -> str | None:
-    """Return the last fenced code block, preferring ```python blocks."""
-    py = re.findall(r"```(?:python|py)[ \t]*\n(.*?)```", text, re.DOTALL)
-    blocks = py or _CODE_BLOCK.findall(text)
-    return blocks[-1].strip() + "\n" if blocks else None
-
-
 def parse_awake_header(text: str) -> dict:
     """Lenient parse of APPROACH_TAGS / EXPECTED_SCORE / RATIONALE / RELEVANT_MEMORY lines.
 
-    Only the text before the first code fence is searched; the first occurrence of each key
-    wins. Missing or garbled lines give None.
+    Only the text before the first code fence (or the first SEARCH marker line of a diff) is
+    searched; the first occurrence of each key wins. Missing or garbled lines give None.
     """
     out: dict = {"approach_tags": None, "expected_score": None, "rationale": None, "relevant_memory": None}
     head = (text or "").split("```", 1)[0]
+    cut = first_marker_offset(head)
+    if cut is not None:
+        head = head[:cut]
     for m in _HEADER.finditer(head):
         key = m.group(1).upper().replace(" ", "_")
         val = m.group(2).strip().strip("*_`").strip()
@@ -125,15 +194,32 @@ def parse_awake_header(text: str) -> dict:
     return out
 
 
+def agent_system(edit_mode: str = "full", awake_tags: bool = False) -> str:
+    """The agent system prompt for an edit mode ("full" is the original prompt, byte for byte)."""
+    if edit_mode == "full":
+        return AGENT_SYSTEM + (AWAKE_HEADER_INSTRUCTIONS if awake_tags else "")
+    return AGENT_SYSTEMS[edit_mode] + (AWAKE_HEADER_INSTRUCTIONS_EDITS if awake_tags else "")
+
+
 def agent_context(task: str, block: str, recent: list[dict], parent: Program, *, cap: int | None = None,
-                  awake_tags: bool = False, parent_side_info: dict | None = None) -> tuple[list[dict], dict]:
-    """(messages, stats) for one agent call; bounded by `cap` (see harness/context.py)."""
-    system = AGENT_SYSTEM + (AWAKE_HEADER_INSTRUCTIONS if awake_tags else "")
-    return build_context(
-        system=system, task=task, memory=block, recent=recent, parent_id=parent.id,
-        parent_score=parent.score if parent.valid else None, parent_code=parent.code,
-        parent_side_info=parent_side_info, cap=cap,
-    )
+                  awake_tags: bool = False, parent_side_info: dict | None = None,
+                  edit_mode: str = "full") -> tuple[list[dict], dict]:
+    """(messages, stats) for one agent call; bounded by `cap` (see harness/context.py).
+
+    stats["edit_mode"] is the mode in force for the step: `edit_mode`, or "full" when diffs were
+    allowed but the parent had to be truncated (the context is then rebuilt with the full-rewrite
+    prompt and TRUNCATED_PARENT_INSTRUCTION, and stats["diffs_forbidden"] is True; see the module
+    docstring)."""
+    kw = dict(task=task, memory=block, recent=recent, parent_id=parent.id,
+              parent_score=parent.score if parent.valid else None, parent_code=parent.code,
+              parent_side_info=parent_side_info, cap=cap)
+    msgs, stats = build_context(system=agent_system(edit_mode, awake_tags), **kw)
+    stats["edit_mode"], stats["diffs_forbidden"] = edit_mode, False
+    if edit_mode != "full" and stats["program_truncated"]:
+        msgs, stats = build_context(system=agent_system("full", awake_tags),
+                                    instruction=TRUNCATED_PARENT_INSTRUCTION, **kw)
+        stats["edit_mode"], stats["diffs_forbidden"] = "full", True
+    return msgs, stats
 
 
 
@@ -183,9 +269,39 @@ def run(
     set_fatigue = getattr(policy, "set_fatigue", None) if cfg.fatigue.enabled else None
     select_recent = getattr(policy, "select_recent", None)
     default_depth = SleepDepth.parse(cfg.fatigue.offline_default_depth)
+    # eval-matched no_sleep control (sleep/no_sleep.py extra_eval_schedule): perturbation evals
+    extra_evals_after = getattr(policy, "extra_evals_after", None)
+    extra_evaluator = evaluator.tagged("extra")
+    extra_rng = random.Random(f"extra_evals|{cfg.seed}")  # separate stream: parent sampling is unchanged
+    extra_sigma = float(getattr(policy, "extra_eval_sigma", 0.05))
+
+    def eval_fields() -> dict:
+        return {"evaluations": evals.used, "sleep_evaluations": evals.sleep_evals}
+
+    def run_extra_evals(step: int, parent: Program, k: int) -> None:
+        """k perturbations of `parent`, each one evaluator call (role "extra"). An improving one
+        (valid and better than the parent) enters the ProgramDB, so the control can build on it.
+        Logged as event "extra_eval", never as a step. EvalExhausted propagates."""
+        for i in range(k):
+            code, n_changed = perturb_program(parent.code, extra_rng, extra_sigma)
+            result = _safe_evaluate(extra_evaluator, code)
+            prev_best = db.best()
+            entered = bool(result.valid and (not parent.valid or result.score > parent.score))
+            pid = f"p{step}x{i}"
+            if entered:
+                db.add(Program(pid, code, result.score, True, parent.id, step))
+                side_infos[pid] = result.side_info
+            history.append(logger.log(
+                step=step, parent_id=parent.id, program_id=pid, program=code, score=result.score,
+                valid=result.valid, error=result.error, event="extra_eval",
+                delta_vs_best=result.score - prev_best.score if (result.valid and prev_best) else None,
+                details={"entered_db": entered, "perturbed_literals": n_changed}, side_info=result.side_info,
+                agent_tokens=budget.agent_tokens, sleep_tokens=budget.sleep_tokens, **eval_fields(),
+                **usage_cursor.take(),
+            ))
 
     def record(step: int, prog: Program, result: EvalResult, awake: dict | None = None,
-               context_tokens: int | None = None) -> dict:
+               context_tokens: int | None = None, edit_fields: dict | None = None) -> dict:
         """Build the step record, feed it to the policy observe hook and the fatigue monitor,
         and append it to `history` (not yet written: see commit_step)."""
         prev_best = db.best()
@@ -197,7 +313,7 @@ def run(
             step=step, parent_id=prog.parent_id, program_id=prog.id, program=prog.code,
             score=result.score, valid=result.valid, error=result.error, delta_vs_best=delta,
             event="step", details=dict(result.details), side_info=result.side_info,
-            context_tokens=context_tokens, **awake,
+            context_tokens=context_tokens, **awake, **(edit_fields or {}),
             surprise=compute_surprise(result.score, result.valid, awake.get("expected_score"),
                                       evaluator.best_known),
         )
@@ -208,7 +324,7 @@ def run(
             if obs.get("perseveration_items"):
                 fields["details"]["perseveration_items"] = obs["perseveration_items"]
         rec = logger.build(agent_tokens=budget.agent_tokens, sleep_tokens=budget.sleep_tokens, **fields,
-                           **usage_cursor.take())
+                           **eval_fields(), **usage_cursor.take())
         monitor.observe(rec)
         rec.update(monitor.log_fields())
         history.append(rec)
@@ -233,7 +349,8 @@ def run(
         if select_recent is not None:
             recent = select_recent(recent, step)
         messages, ctx = agent_context(evaluator.description, block, recent, parent, cap=context_cap,
-                                      awake_tags=awake_tags, parent_side_info=side_infos.get(parent.id))
+                                      awake_tags=awake_tags, parent_side_info=side_infos.get(parent.id),
+                                      edit_mode=cfg.edit_mode)
         try:
             resp = llm.complete(messages, role="agent", max_tokens=cfg.max_completion_tokens)
         except BudgetExhausted:
@@ -242,16 +359,22 @@ def run(
         except BillingError as e:
             stop_reason, billing_error = "billing_error", e
             break
-        code = extract_program(resp.text)
+        edit = decide_edit(resp.text, parent.code, cfg.edit_mode, diffs_forbidden=ctx["diffs_forbidden"])
+        code = edit.code  # always the FULL program (a diff is already applied to the parent)
         awake = parse_awake_header(resp.text) if awake_tags else None
         try:
-            result = _safe_evaluate(evaluator, code) if code else invalid(
-                "no ```python code block in response")
+            result = _safe_evaluate(evaluator, code) if code else invalid(edit.error)
         except EvalExhausted:
             stop_reason = "eval_limit"
             break
+        edit_fields = {
+            "edit_mode": ctx["edit_mode"], "edit_kind": edit.kind, "diff_blocks": edit.stats.get("blocks"),
+            "diff_lines_changed": edit.stats.get("lines_changed"), "diff_fuzzy_blocks": edit.stats.get("fuzzy_blocks"),
+            "diff_error": edit.diff_error, "parent_truncated": bool(ctx["program_truncated"]),
+            "full_rewrite_reason": parse_full_rewrite_reason(resp.text) if edit.kind == "full" else None,
+        }
         rec = record(step, Program(f"p{step}", code or "", result.score if result.valid else INVALID_SCORE,
-                                   result.valid, parent.id, step), result, awake, ctx["tokens"])
+                                   result.valid, parent.id, step), result, awake, ctx["tokens"], edit_fields)
         steps_done = step
 
         if set_fatigue is not None:
@@ -294,9 +417,16 @@ def run(
                     step=step, agent_tokens=budget.agent_tokens, sleep_tokens=budget.sleep_tokens,
                     event="sleep", details={"policy": policy.name, "block": block, **metrics},
                     block_tokens=count_tokens(block), **top, **monitor.log_fields(monitor.current()),
-                    **usage_cursor.take(),
+                    **eval_fields(), **usage_cursor.take(),
                 )
             )
+        n_extra = extra_evals_after(step) if extra_evals_after is not None else 0
+        if n_extra:
+            try:
+                run_extra_evals(step, parent, n_extra)
+            except EvalExhausted:
+                stop_reason = "eval_limit"
+                break
         if budget.exhausted:
             stop_reason = "budget_exhausted"
             break
@@ -311,6 +441,7 @@ def run(
         "sleep_policy": policy.name,
         "arm": cfg.baseline_arm or policy.name,
         "seed": cfg.seed,
+        "edit_mode": cfg.edit_mode,
         "steps_completed": steps_done,
         "stop_reason": stop_reason,
         "best_program_id": best.id if best else None,
@@ -319,7 +450,8 @@ def run(
         "best_normalized": normalized_score(best.score, evaluator.best_known) if best else None,
         "best_step": best.step if best else None,
         "budget": budget.snapshot(),
-        "evaluations": evals.snapshot(),
+        "evaluations": {**evals.snapshot(), "extra_scheduled": sum(getattr(policy, "extra_eval_schedule", {})
+                                                                   .values())},
         "fatigue": {
             "enabled": cfg.fatigue.enabled,
             "sleeps": {d.label: sum(1 for _, x in monitor.sleeps if x == d)
@@ -339,7 +471,8 @@ def run(
         summary["metrics"] = compute_run_metrics(
             history, best_known=evaluator.best_known, total_budget=budget.total_tokens, budget=budget.snapshot(),
             scheduled=getattr(policy, "scheduled_sleeps", None), cfg=cfg.metrics, fatigue_cfg=cfg.fatigue,
-            arm=summary["arm"], sleep_policy=policy.name)
+            arm=summary["arm"], sleep_policy=policy.name, evaluations=summary["evaluations"],
+            edit_mode=cfg.edit_mode)
     except Exception as e:  # pragma: no cover - defensive
         summary["metrics"] = {"error": f"{type(e).__name__}: {e}"}
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

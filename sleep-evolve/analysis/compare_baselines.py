@@ -19,6 +19,23 @@ Per contrast and outcome: median paired difference with a seeded bootstrap 95% C
 Wilcoxon signed-rank p (analysis/baseline_stats.py: exact for <= 20 non-zero pairs, else normal
 approximation), and win/tie/loss counts from the first arm's point of view.
 
+Token-matched vs eval-matched (every contrast row has `matching`):
+  tokens  the outcomes above. Every arm has the same total token budget (sleep tokens included), so
+          these compare at an equal token spend.
+  evals   score_at_matched_evals: per pair, N = min(total evaluator calls of the two runs) (agent steps
+          + replays + dream tests + extra evals; the cumulative `evaluations` log field), and each run's
+          best-so-far normalized score over candidates evaluated within its first N calls
+          (harness/metrics.best_at_evaluations). Sleeping arms spend evaluator calls on replays, so this
+          asks whether sleep helps at an equal evaluation spend. Pairs whose logs lack evaluation counts
+          are skipped. Each CONTRASTS entry is reported both ways.
+Per arm, evaluations used (total, sleep, extra) are reported next to tokens and cost.
+Per arm, agent edit kinds (harness/edits.py, metrics["edits"]): the run's edit_mode, the mean share of
+agent steps that replied with a SEARCH/REPLACE diff (diff%), and the mean count of diff-apply failures
+per run (dfail); "-" when the logs carry no edit fields. edit_mode is part of the agent, identical in
+every arm (drift check), so a mixed value flags runs from different configs.
+no_sleep_extra_evals (harness/baselines.py) is the eval-matched Q1 control: no_sleep plus the paired
+fatigue run's sleep evaluations spent on parent perturbations.
+
 Cost: per arm, the total and mean dollar cost of its runs from summary.json["cost"]["total"]
 (harness/cost.py, computed from the logged usage and the config's price table); runs without a known
 cost (mock configs, older logs, unpriced models) are counted in `cost_unknown_runs` and left out of
@@ -51,16 +68,19 @@ import numpy as np
 from analysis.baseline_stats import bootstrap_median_ci, wilcoxon_signed_rank, win_tie_loss
 from analysis.fatigue_logs import RunLog, find_runs
 from harness.fatigue import FatigueConfig
-from harness.metrics import around_steps, best_curve, compute_run_metrics, normalized_at
+from harness.metrics import (
+    around_steps, best_at_evaluations, best_curve, compute_run_metrics, evaluations_used, normalized_at,
+)
 
 ALPHA = 0.05
-ARM_ORDER = ("no_sleep", "sleep_lite", "fixed_letta", "fixed_sparse", "fixed_matched", "random_matched",
+ARM_ORDER = ("no_sleep", "no_sleep_extra_evals", "sleep_lite", "fixed_letta", "fixed_sparse", "fixed_matched", "random_matched",
              "fatigue", "fixed_tiered", "summarize", "dream_unvalidated", "dream", "dream_distill")
 SLEEP_ARMS = ("fixed_letta", "fixed_sparse", "fixed_matched", "random_matched", "fatigue", "fixed_tiered")
 CONTRASTS = (
     ("Q1", "fatigue", "no_sleep"),
     ("Q1", "fixed_letta", "no_sleep"),
     ("Q1", "sleep_lite", "no_sleep"),
+    ("Q1", "fatigue", "no_sleep_extra_evals"),  # eval-matched control: same evaluator calls, no sleep
     ("Q2", "fatigue", "fixed_letta"),
     ("Q2", "fatigue", "fixed_matched"),
     ("Q2", "fixed_matched", "random_matched"),
@@ -77,6 +97,8 @@ OUTCOMES = {  # name -> (label, better)
     "score_at_25": ("best normalized score at 25% of budget", "higher"),
 }
 PRIMARY = "final_score"
+EVAL_OUTCOME = "score_at_matched_evals"
+EVAL_LABEL = "best normalized score at the pair's matched evaluator-call count"
 BUDGET_GRID = np.linspace(0.0, 1.0, 51)
 
 INTERPRETATION_GUIDE = """Interpretation guide
@@ -121,6 +143,12 @@ def arm_of(run: RunLog) -> str:
     return str(s.get("arm") or (s.get("config") or {}).get("baseline_arm") or run.policy)
 
 
+def run_edit_mode(run: RunLog) -> str | None:
+    """RunConfig.edit_mode of a run (summary.json), None for older logs."""
+    s = run.summary or {}
+    return s.get("edit_mode") or (s.get("config") or {}).get("edit_mode")
+
+
 def _fatigue_cfg(run: RunLog) -> FatigueConfig:
     try:
         return FatigueConfig(**((run.summary.get("config") or {}).get("fatigue") or {}))
@@ -138,7 +166,7 @@ def load_baseline_runs(root: str | Path) -> list[BaselineRun]:
         if not m or "error" in m:
             m = compute_run_metrics(r.history, best_known=r.best_known, total_budget=total,
                                     budget=(r.summary or {}).get("budget"), fatigue_cfg=_fatigue_cfg(r),
-                                    arm=arm_of(r), sleep_policy=r.policy)
+                                    arm=arm_of(r), sleep_policy=r.policy, edit_mode=run_edit_mode(r))
         out.append(BaselineRun(r, arm_of(r), m, best_curve(r.history, r.best_known, total)))
     return out
 
@@ -160,11 +188,16 @@ def _arms_present(runs: list[BaselineRun]) -> list[str]:
 # ---------------------------------------------------------------------------------------------
 
 
+def _sorted_keys(pairs: dict) -> list:
+    return sorted(pairs, key=lambda k: (str(k[0]), str(k[1])))
+
+
 def contrast(pairs: dict, a: str, b: str, outcome: str, *, n_boot: int = 10000, seed: int = 0,
              alpha: float = ALPHA) -> dict:
+    """Token-matched contrast (every arm has the same token budget)."""
     label, better = OUTCOMES[outcome]
     diffs, keys, censored = [], [], 0
-    for key in sorted(pairs, key=lambda k: (str(k[0]), str(k[1]))):
+    for key in _sorted_keys(pairs):
         arms = pairs[key]
         if a not in arms or b not in arms:
             continue
@@ -175,6 +208,46 @@ def contrast(pairs: dict, a: str, b: str, outcome: str, *, n_boot: int = 10000, 
         censored += int(ca) + int(cb)
         diffs.append(float(va) - float(vb))
         keys.append(list(key))
+    return {"matching": "tokens", **_stats_row(a, b, outcome, label, better, diffs, keys, censored,
+                                               n_boot=n_boot, seed=seed, alpha=alpha)}
+
+
+def run_evaluations(br: BaselineRun) -> int | None:
+    """Total evaluator calls of a run: summary.json["evaluations"]["used"], else the log's cumulative count."""
+    used = ((br.run.summary or {}).get("evaluations") or {}).get("used")
+    if isinstance(used, int) and not isinstance(used, bool):
+        return used
+    return evaluations_used(br.run.history)
+
+
+def eval_matched_contrast(pairs: dict, a: str, b: str, *, n_boot: int = 10000, seed: int = 0,
+                          alpha: float = ALPHA) -> dict:
+    """Per pair: N = min(evaluator calls of the two runs); outcome = best normalized score within each run's
+    first N calls. Pairs without evaluation counts (or with no valid candidate by N) are skipped."""
+    diffs, keys, matched_n = [], [], []
+    for key in _sorted_keys(pairs):
+        arms = pairs[key]
+        if a not in arms or b not in arms:
+            continue
+        ra, rb = arms[a], arms[b]
+        na, nb = run_evaluations(ra), run_evaluations(rb)
+        if na is None or nb is None:
+            continue
+        n = min(na, nb)
+        va = best_at_evaluations(ra.run.history, ra.run.best_known, n)
+        vb = best_at_evaluations(rb.run.history, rb.run.best_known, n)
+        if va is None or vb is None:
+            continue
+        diffs.append(float(va) - float(vb))
+        keys.append(list(key))
+        matched_n.append(n)
+    row = _stats_row(a, b, EVAL_OUTCOME, EVAL_LABEL, "higher", diffs, keys, 0, n_boot=n_boot, seed=seed,
+                     alpha=alpha)
+    return {"matching": "evals", **row, "matched_evaluations": matched_n}
+
+
+def _stats_row(a: str, b: str, outcome: str, label: str, better: str, diffs: list, keys: list, censored: int,
+               *, n_boot: int, seed: int, alpha: float) -> dict:
     med, lo, hi = bootstrap_median_ci(diffs, n_boot=n_boot, seed=seed)
     w = wilcoxon_signed_rank(diffs)
     sign = 1.0 if better == "higher" else -1.0
@@ -200,6 +273,7 @@ def all_contrasts(runs: list[BaselineRun], **kw) -> list[dict]:
             continue
         for outcome in OUTCOMES:
             out.append({"question": q, **contrast(pairs, a, b, outcome, **kw)})
+        out.append({"question": q, **eval_matched_contrast(pairs, a, b, **kw)})
     return out
 
 
@@ -267,9 +341,25 @@ def arm_summaries(runs: list[BaselineRun]) -> dict[str, dict]:
             "evals_used_mean": _nanmean([run_evals(r)[0] for r in rs]),
             "evals_agent_mean": _nanmean([run_evals(r)[1] for r in rs]),
             "evals_sleep_mean": _nanmean([run_evals(r)[2] for r in rs]),
+            "evals_extra_mean": _nanmean([((r.run.summary or {}).get("evaluations") or {}).get("extra_evals")
+                                          for r in rs]),
+            **_edit_fields(rs),
             **_cost_fields([run_cost(r) for r in rs]),
         }
     return out
+
+
+def _edit_fields(rs: list[BaselineRun]) -> dict:
+    ed = [r.metrics.get("edits") or {} for r in rs]
+    modes = sorted({m for m in (run_edit_mode(r.run) for r in rs) if m})
+    return {
+        "edit_mode": modes[0] if len(modes) == 1 else ("mixed:" + ",".join(modes) if modes else None),
+        "diff_share_mean": _nanmean([e.get("diff_share") for e in ed]),
+        "full_steps_mean": _nanmean([e.get("full_steps") for e in ed]),
+        "diff_steps_mean": _nanmean([e.get("diff_steps") for e in ed]),
+        "diff_apply_failures_mean": _nanmean([e.get("diff_apply_failures") for e in ed]),
+        "parent_truncated_steps_mean": _nanmean([e.get("parent_truncated_steps") for e in ed]),
+    }
 
 
 def _cost_fields(costs: list[float | None]) -> dict:
@@ -383,6 +473,11 @@ def summary_paragraph(cs: list[dict], alpha: float = ALPHA) -> str:
         parts.append(head + ". " + "; ".join(q1) + ".")
     else:
         parts.append("Q1 (does sleep help?): not testable (fatigue / fixed_letta / no_sleep runs missing).")
+    ev = [s for s in (_sentence(_find(cs, a, b, EVAL_OUTCOME)) for a, b in
+                      (("fatigue", "no_sleep"), ("fatigue", "no_sleep_extra_evals"), ("fixed_letta", "no_sleep")))
+          if s]
+    if ev:
+        parts.append("Q1 at an equal evaluator-call count (replays included): " + "; ".join(ev) + ".")
     if q2:
         fm = _find(cs, "fatigue", "fixed_matched")
         b = _better(fm)
@@ -594,7 +689,7 @@ def format_report(rep: dict) -> str:
     lines.append("Per arm (medians across runs; sleeps = LLM sleeps):")
     lines.append(f"  {'arm':16s} {'n':>3s} {'final':>7s} {'@25%':>7s} {'95%reach':>8s} {'b2_95':>6s} "
                  f"{'sleeps':>6s} {'forget':>6s} {'sleep%':>6s} {'added':>6s} {'evict':>6s} {'wasted':>6s} "
-                 f"{'evals':>6s} {'ev/slp':>6s} {'cost$':>9s}")
+                 f"{'evals':>6s} {'ev/slp':>6s} {'ev/ext':>6s} {'edit':>5s} {'diff%':>6s} {'dfail':>6s} {'cost$':>9s}")
     f = (lambda x, nd=3: "-" if x is None else f"{x:.{nd}f}")
     for arm, s in rep["arm_summaries"].items():
         lines.append(f"  {arm:16s} {s['n_runs']:>3d} {f(s['final_score_median']):>7s} {f(s['score_at_25_median']):>7s} "
@@ -603,7 +698,10 @@ def format_report(rep: dict) -> str:
                      f"{f(None if s['sleep_share_of_budget_mean'] is None else 100 * s['sleep_share_of_budget_mean'], 1):>6s} "
                      f"{f(s['items_added_mean'], 1):>6s} {f(s['items_evicted_mean'], 1):>6s} "
                      f"{f(s['replays_wasted_mean'], 1):>6s} {f(s['evals_used_mean'], 1):>6s} "
-                     f"{f(s['evals_sleep_mean'], 1):>6s} {_cost_txt(s):>9s}")
+                     f"{f(s['evals_sleep_mean'], 1):>6s} {f(s['evals_extra_mean'], 1):>6s} "
+                     f"{(s.get('edit_mode') or '-')[:5]:>5s} "
+                     f"{f(None if s.get('diff_share_mean') is None else 100 * s['diff_share_mean'], 1):>6s} "
+                     f"{f(s.get('diff_apply_failures_mean'), 1):>6s} {_cost_txt(s):>9s}")
         if s["scheduled_vs_realized"]:
             lines.append(f"  {'':16s} scheduled vs realized sleeps per run: {s['scheduled_vs_realized']}")
     if rep.get("cost"):
@@ -616,17 +714,21 @@ def format_report(rep: dict) -> str:
                  for k in ("perseveration_rate", "invalid_rate", "calibration_error")]
         lines.append(f"  {arm + star:17s} " + "  ".join(parts))
     lines += ["", "Paired contrasts (first arm minus second; W/T/L from the first arm's view):"]
-    lines.append(f"  {'Q':2s} {'contrast':32s} {'outcome':13s} {'n':>3s} {'median':>8s} {'95% CI':>19s} "
+    lines.append(f"  {'Q':2s} {'contrast':32s} {'match':5s} {'outcome':13s} {'n':>3s} {'median':>8s} {'95% CI':>19s} "
                  f"{'p':>7s} {'W/T/L':>8s} {'cens':>4s}  verdict")
     for c in rep["contrasts"]:
         ci = "-" if c["ci95"][0] is None else f"[{c['ci95'][0]:+.3f},{c['ci95'][1]:+.3f}]"
         med = "-" if c["median_diff"] is None else f"{c['median_diff']:+.4f}"
-        lines.append(f"  {c['question']:2s} {c['a'] + ' - ' + c['b']:32s} {c['outcome']:13s} {c['n_pairs']:>3d} "
+        match = "evals" if c.get("matching") == "evals" else "tok"
+        outcome = "score@evals" if c["outcome"] == EVAL_OUTCOME else c["outcome"]
+        lines.append(f"  {c['question']:2s} {c['a'] + ' - ' + c['b']:32s} {match:5s} {outcome:13s} {c['n_pairs']:>3d} "
                      f"{med:>8s} {ci:>19s} {c['p']:>7.3g} {c['win']:>2d}/{c['tie']}/{c['loss']:<3d} "
                      f"{c['censored_runs']:>4d}  {c['verdict']}")
     test = next((c["test"] for c in rep["contrasts"] if c["n_pairs"]), "n/a")
     lines += [f"  (Wilcoxon signed-rank, two-sided: {test}; median CI: percentile bootstrap, "
               f"{rep['n_boot']} resamples, seed {rep['bootstrap_seed']}; budget_to_95 'not reached' = 1.0, censored)",
+              "  (match tok = equal token budget; evals = score at N = min(evaluator calls of the pair), "
+              "replays and extra evals included)",
               "", "Summary", "  " + rep["summary"], "", "What the results support:"]
     lines += [f"  - {x}" for x in rep["interpretation"]]
     lines += ["", rep["interpretation_guide"]]
