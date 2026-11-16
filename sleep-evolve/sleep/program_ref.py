@@ -162,13 +162,13 @@ def resolve_pair(control, treatment, index: ProgramIndex | None, *, full_chars: 
         info["treatment_diff"] = d[:diff_chars]
         info["treatment_diff_capped"] = len(d) > diff_chars
         try:
-            prog, st = apply_diff(out.control, d)
+            prog, st = apply_diff(out.control, d, allow_indent_fuzzy=True)
         except DiffError as e:
             out.error = f"treatment {e}"
             info["apply_error"] = out.error
             return out
         info.update(diff_blocks=st["blocks"], diff_lines_changed=st["lines_changed"],
-                    diff_fuzzy_blocks=st["fuzzy_blocks"])
+                    diff_fuzzy_blocks=st["fuzzy_blocks"], diff_indent_fuzzy=st["indent_fuzzy_blocks"])
         out.treatment = prog
     else:
         text = _full_text(treatment)

@@ -208,14 +208,44 @@ def _occurrences(lines: list[str], needle: list[str], key=lambda s: s) -> list[i
     return [i for i in range(len(lines) - n + 1) if [key(x) for x in lines[i:i + n]] == want]
 
 
-def apply_blocks(parent: str, blocks: list[EditBlock]) -> tuple[str, dict]:
-    """Apply `blocks` in order to `parent` (rules in the module docstring) -> (program, stats)."""
+def _indent(s: str) -> str:
+    return s[: len(s) - len(s.lstrip())]
+
+
+def _reindent(replace: list[str], search: list[str], parent_lines: list[str]) -> list[str]:
+    """Shift REPLACE lines to the parent's indentation level (leading-whitespace fallback).
+
+    Uniform shift by (p0 - s0): s0 = the model's indent on its first non-blank SEARCH line,
+    p0 = the parent's indent on the corresponding matched line. Every non-blank REPLACE line
+    moves by the same amount, so relative structure inside the replacement is preserved;
+    blank lines are kept blank."""
+    j = next((k for k, s in enumerate(search) if s.strip()), 0)
+    s0 = _indent(search[j])
+    p0 = _indent(parent_lines[j]) if j < len(parent_lines) else ""
+    delta = len(p0) - len(s0)
+    out = []
+    for r in replace:
+        if not r.strip():
+            out.append("")
+        elif delta >= 0:
+            out.append(" " * delta + r)
+        else:
+            out.append(r[min(-delta, len(r) - len(r.lstrip())):])
+    return out
+
+
+def apply_blocks(parent: str, blocks: list[EditBlock], *, allow_indent_fuzzy: bool = False) -> tuple[str, dict]:
+    """Apply `blocks` in order to `parent` (rules in the module docstring) -> (program, stats).
+
+    With allow_indent_fuzzy (sleep-side tests only; agent edits stay strict), a third tier after
+    exact and rstrip: whole lines compared with leading AND trailing whitespace ignored; on a
+    unique match the REPLACE lines are re-indented to the parent's level (_reindent)."""
     src = _norm(parent)
     trailing_nl = src.endswith("\n")
     lines = src[:-1].split("\n") if trailing_nl else src.split("\n")
     if src == "":
         lines = []
-    fuzzy = 0
+    fuzzy = indent_fuzzy = 0
     for b, blk in enumerate(blocks, 1):
         if not blk.search or all(not s.strip() for s in blk.search):
             raise DiffError(f"{DIFF_FAILED}: SEARCH block {b} is empty")
@@ -224,18 +254,25 @@ def apply_blocks(parent: str, blocks: list[EditBlock]) -> tuple[str, dict]:
             hits = _occurrences(lines, blk.search, key=str.rstrip)
             if len(hits) == 1:
                 fuzzy += 1
+        replace = list(blk.replace)
+        if not hits and allow_indent_fuzzy:
+            hits = _occurrences(lines, blk.search, key=str.strip)
+            if len(hits) == 1:
+                indent_fuzzy += 1
+                replace = _reindent(blk.replace, blk.search, lines[hits[0]:hits[0] + len(blk.search)])
         if not hits:
             raise DiffError(f"{DIFF_FAILED}: SEARCH block {b} not found in parent")
         if len(hits) > 1:
             raise DiffError(f"{DIFF_FAILED}: SEARCH block {b} matches {len(hits)} places in parent (ambiguous)")
         i = hits[0]
-        lines = lines[:i] + list(blk.replace) + lines[i + len(blk.search):]
+        lines = lines[:i] + replace + lines[i + len(blk.search):]
     out = "\n".join(lines) + ("\n" if trailing_nl or not lines else "")
     if not out.strip():
         raise DiffError(f"{DIFF_FAILED}: the result is an empty program")
     if not out.endswith("\n"):
         out += "\n"
-    return out, {"blocks": len(blocks), "lines_changed": lines_changed(src, out), "fuzzy_blocks": fuzzy}
+    return out, {"blocks": len(blocks), "lines_changed": lines_changed(src, out), "fuzzy_blocks": fuzzy,
+                 "indent_fuzzy_blocks": indent_fuzzy}
 
 
 def lines_changed(a: str, b: str) -> int:
@@ -248,9 +285,9 @@ def lines_changed(a: str, b: str) -> int:
     return n
 
 
-def apply_diff(parent: str, text: str) -> tuple[str, dict]:
+def apply_diff(parent: str, text: str, *, allow_indent_fuzzy: bool = False) -> tuple[str, dict]:
     """parse_blocks + apply_blocks. Raises DiffError."""
-    return apply_blocks(parent, parse_blocks(text))
+    return apply_blocks(parent, parse_blocks(text), allow_indent_fuzzy=allow_indent_fuzzy)
 
 
 def decide_edit(text: str, parent: str, mode: EditMode, *, diffs_forbidden: bool = False) -> EditOutcome:

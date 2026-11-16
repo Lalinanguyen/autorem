@@ -1915,7 +1915,7 @@ def sr(search: str, replace: str) -> str:
 def test_diff_single_and_multiple_blocks_apply_in_order():
     out, st = apply_diff(PARENT, "Rationale.\n" + sr("    xs = [0.0] * n", "    xs = [0.7] * n"))
     assert out == PARENT.replace("[0.0]", "[0.7]")
-    assert st == {"blocks": 1, "lines_changed": 2, "fuzzy_blocks": 0}
+    assert st == {"blocks": 1, "lines_changed": 2, "fuzzy_blocks": 0, "indent_fuzzy_blocks": 0}
     reply = ("```python\n" + sr("    n = 5", "    n = 5\n    k = 2") + "```\ntext\n"
              + sr("    k = 2\n    xs = [0.0] * n", "    xs = [0.7] * (n + k - 2)") + sr("import math\n", ""))
     blocks = parse_blocks(reply)  # fences and prose between blocks are ignored
@@ -1939,6 +1939,27 @@ def test_diff_exact_match_first_then_trailing_whitespace_fallback_only():
     # exact beats fallback: "x = 1" exists exactly once, "x = 1 " (trailing space) once
     two = "a\nx = 1\nx = 1 \nb\n"
     assert apply_diff(two, sr("x = 1", "y"))[0] == "a\ny\nx = 1 \nb\n"
+
+
+def test_indent_fuzzy_is_sleep_only_and_reindents_the_replacement():
+    # models drop the parent's indentation (the observed gpt-5-nano failure): exact and rstrip
+    # must still fail (agent strictness), the opt-in lenient tier matches and re-indents
+    p = "def construct():\n    seeds = [0, 1, 2]\n    return seeds\n"
+    d = sr("seeds = [0, 1, 2]", "seeds = [0, 1, 2, 3]")
+    with pytest.raises(DiffError, match="not found"):
+        apply_diff(p, d)
+    out, st = apply_diff(p, d, allow_indent_fuzzy=True)
+    assert out == "def construct():\n    seeds = [0, 1, 2, 3]\n    return seeds\n"
+    assert st["indent_fuzzy_blocks"] == 1 and st["fuzzy_blocks"] == 0
+    # nested replacement keeps its relative indent under the parent's base level (uniform shift)
+    p2 = "def f():\n    if ok:\n        x = 1\n    return x\n"
+    d2 = sr("if ok:\n        x = 1", "if ok:\n        x = 1\n        y = 2")
+    out2, _ = apply_diff(p2, d2, allow_indent_fuzzy=True)
+    assert out2 == "def f():\n    if ok:\n            x = 1\n            y = 2\n    return x\n"
+    compile(out2, "<indent_fuzzy>", "exec")  # deeper but still a valid nested block
+    # ambiguous at the strip level still errors (no exact or rstrip hits, two strip hits)
+    with pytest.raises(DiffError, match="ambiguous"):
+        apply_diff("  x = 1\n    x = 1\n", sr("x = 1", "y"), allow_indent_fuzzy=True)
 
 
 def test_diff_zero_and_ambiguous_matches_are_errors():
