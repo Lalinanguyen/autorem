@@ -17,6 +17,7 @@ k_recent: 5
 max_completion_tokens: 16384
 context_cap_tokens: 8000
 awake_tags: true
+edit_mode: auto                  # agent replies with diffs by default; full rewrites need FULL_REWRITE_REASON
 max_evaluations: null            # shared eval cap (agent steps + replays + dream tests); null = off
 
 sleep_policy: full_sleep
