@@ -362,6 +362,10 @@ def run(
         edit = decide_edit(resp.text, parent.code, cfg.edit_mode, diffs_forbidden=ctx["diffs_forbidden"])
         code = edit.code  # always the FULL program (a diff is already applied to the parent)
         awake = parse_awake_header(resp.text) if awake_tags else None
+        if awake and awake.get("relevant_memory"):
+            # citations are self-reported: flag ids the agent cannot have seen in its memory block
+            awake["relevant_memory_unknown"] = [m for m in awake["relevant_memory"]
+                                                if f"[{m}]" not in block] or None
         try:
             result = _safe_evaluate(evaluator, code) if code else invalid(edit.error)
         except EvalExhausted:

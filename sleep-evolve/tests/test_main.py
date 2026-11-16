@@ -5213,7 +5213,8 @@ DREAMS_JSON = json.dumps({"dreams": [
      "sources": ["m1", "m2"], "rationale": "both point at the target",
      "test": {"control": HALF, "treatment": GOOD, "change": "0.5 -> 0.7"}},
     {"did": "d2", "kind": "extrapolation", "text": "an untried direction may help",
-     "sources": ["m3", "2"], "rationale": "no memory covers it", "test": None},
+     "sources": ["m3", "2"], "rationale": "no memory covers it", "test": None,
+     "no_test_reason": "not expressible as a program change"},
 ]})
 
 
@@ -5226,6 +5227,11 @@ def test_parse_good_dreams():
     assert d1["did"] == "d1" and d1["kind"] == "association"
     assert d1["sources"] == ["m1", "m2"] and d1["test"]["treatment"] == GOOD
     assert d2["kind"] == "extrapolation" and d2["test"] is None
+    assert d2["no_test_reason"] == "not expressible as a program change"
+    # a null test WITHOUT the reason is kept but reported: the model opted out unjustified
+    dreams, problems = parse_dreams({"dreams": [{"text": "h", "test": None}]}, max_dreams=5)
+    assert len(dreams) == 1 and dreams[0]["no_test_reason"] is None
+    assert problems == ["dream 0 test is null with no no_test_reason"]
 
 
 def test_parse_drops_bad_entries_and_normalizes():
@@ -5240,7 +5246,8 @@ def test_parse_drops_bad_entries_and_normalizes():
     assert [d["did"] for d in dreams] == ["d1", "d3"]
     assert dreams[0]["kind"] == "association" and dreams[0]["sources"] == ["m1"]
     assert dreams[1]["sources"] == ["1", "m2"]
-    assert len(problems) == 3
+    # 3 bad entries + the 2 kept dreams have null tests and no no_test_reason
+    assert len(problems) == 5 and sum("no no_test_reason" in p for p in problems) == 2
 
 
 def test_parse_tolerates_garbage_and_caps_count():

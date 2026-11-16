@@ -74,7 +74,10 @@ dream untested.
 same iteration counts, same everything else; the line(s) implementing the change are the only
 difference. Fix every random seed. Identical programs are discarded untested.
 The programs need not be competitive with the best score; only the difference is judged.
-"test" may be null only for hypotheses that genuinely cannot be sandbox-tested.
+Attach a test whenever the hypothesis can be tried in a program — that is nearly always. When
+unsure which control to use, {"base": "best"} (the run's best program) is always valid. "test"
+may be null ONLY for a hypothesis that truly cannot be expressed as a program change, and then
+you MUST give "no_test_reason" (one short line).
 
 Output JSON only:
 {
@@ -83,7 +86,8 @@ Output JSON only:
               "sources": ["m3", "m7", "12"], "rationale": "why these sources suggest it",
               "test": {"control": {"base": "p12"},
                        "treatment": {"diff": "<<<<<<< SEARCH\\n...\\n=======\\n...\\n>>>>>>> REPLACE"},
-                       "change": "what differs, one line"} | null}]
+                       "change": "what differs, one line"} | null,
+              "no_test_reason": "required when test is null; omit otherwise"}]
 }""")
 
 
@@ -92,8 +96,10 @@ def validate_dreams(obj: dict | None, *, max_dreams: int,
     """Return (dreams, problems). Bad entries are dropped and reported, never raised.
 
     Each kept dream: {"did", "kind" (default "association"), "text", "sources" (list[str]),
-    "rationale", "test" ({"control", "treatment", "change"} or None)}. Text and rationale are
-    whitespace-collapsed and capped at max_chars; dids are deduped; at most max_dreams kept.
+    "rationale", "test" ({"control", "treatment", "change"} or None), "no_test_reason" (str or
+    None)}. Text and rationale are whitespace-collapsed and capped at max_chars; dids are deduped;
+    at most max_dreams kept. A null test without a no_test_reason is reported in problems (the
+    model opted out without justification) — the dream is still kept as untested.
     """
     problems: list[str] = []
     if not isinstance(obj, dict):
@@ -125,12 +131,17 @@ def validate_dreams(obj: dict | None, *, max_dreams: int,
             src = [src] if src is not None else []
         sources = [str(s) for s in src if isinstance(s, (str, int)) and str(s).strip()]
         rationale = d.get("rationale")
+        test = _as_test(d.get("test"), i, problems, max_chars)
+        reason = d.get("no_test_reason")
+        reason = " ".join(reason.split())[:max_chars] if isinstance(reason, str) else ""
+        if test is None and not reason:
+            problems.append(f"dream {i} test is null with no no_test_reason")
         dreams.append({
             "did": did, "kind": kind, "text": " ".join(text.split())[:max_chars],
             "sources": sources,
             "rationale": " ".join(rationale.split())[:max_chars]
             if isinstance(rationale, str) else "",
-            "test": _as_test(d.get("test"), i, problems, max_chars),
+            "test": test, "no_test_reason": reason or None,
         })
         if len(dreams) >= max_dreams:
             break

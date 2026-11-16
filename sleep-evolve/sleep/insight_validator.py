@@ -55,7 +55,7 @@ def validate_dreams(dreams: list[dict], store: MemoryStore, evaluator, *,
             "sources": list(d.get("sources") or []), "rationale": d.get("rationale") or "",
             "status": "untested", "replay_rid": None, "evaluations": 0,
             "control_score": None, "treatment_score": None, "score_diff": None,
-            "decision_reason": None,
+            "decision_reason": None, "no_test_reason": d.get("no_test_reason"),
         }
         records.append(rec)
         test = d.get("test")
@@ -69,7 +69,8 @@ def validate_dreams(dreams: list[dict], store: MemoryStore, evaluator, *,
         if evaluator is None:
             rec["decision_reason"] = "no evaluator bound"
         elif test is None:
-            rec["decision_reason"] = "no test attached"
+            rec["decision_reason"] = ("no test attached: " + rec["no_test_reason"]
+                                      if rec["no_test_reason"] else "no test attached")
         elif res is not None and res.error:
             rec["decision_reason"] = res.error
         elif not is_program(control):

@@ -31,6 +31,9 @@ Awake / sleep metrics (always present; null when the policy or event does not pr
   expected_score    float | null      step: the agent's EXPECTED_SCORE prediction
   rationale         str | null        step: RATIONALE header line (<= 500 chars)
   relevant_memory   list[str] | null  step: memory ids from RELEVANT_MEMORY
+  relevant_memory_unknown  list[str] | null  step: the cited ids absent from the step's memory
+                                      block (self-reported citations it cannot have seen); null
+                                      when every citation resolved
   surprise          float | null      step: |score - expected| / |best_known|; 1.0 if invalid with a
                                       prediction; null without a prediction
   perseveration_hit bool | null       step: tags matched a dead-end memory item (policy observe hook)
@@ -113,7 +116,8 @@ EDIT_FIELDS = ("edit_mode", "edit_kind", "diff_blocks", "diff_lines_changed", "d
 FIELDS = (
     "run_id", "step", "parent_id", "program_id", "program", "score", "valid", "error",
     "delta_vs_best", "agent_tokens", "sleep_tokens", "wallclock", "event", "details", "side_info",
-    "approach_tags", "expected_score", "rationale", "relevant_memory", "surprise", "perseveration_hit",
+    "approach_tags", "expected_score", "rationale", "relevant_memory", "relevant_memory_unknown",
+    "surprise", "perseveration_hit",
     "context_tokens", "pressure", "sleep_mode", "block_tokens", "items_added", "items_evicted",
     "replays_wasted", "evaluations", "sleep_evaluations",
     *EDIT_FIELDS,
