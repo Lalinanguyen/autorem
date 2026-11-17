@@ -958,6 +958,66 @@ def test_loop_logs_usage_per_line_and_cost_per_run(run_dir, mock_cfg):
     assert s["llm_params"] is None  # a transport without resolved params (the mock) records none
 
 
+class _CloneableTransport:
+    """Transport that can re-target a model (like OpenAICompatTransport.with_model)."""
+
+    def __init__(self, model: str, log: list | None = None):
+        self.model = model
+        self.log = log if log is not None else []
+
+    def __call__(self, messages, max_tokens):
+        role = "sleep" if "consolidat" in messages[0]["content"].lower() else "agent"
+        self.log.append((self.model, role))
+        return LLMResponse(GOOD_REPLY if role == "agent" else "notes", 60, 40)
+
+    def with_model(self, model):
+        return _CloneableTransport(model, self.log)
+
+
+def test_with_model_shares_the_budget_and_swaps_the_transport():
+    t = _CloneableTransport("a")
+    budget = Budget(100)
+    c1 = LLMClient(budget, t, sleep_fn=lambda s: None)
+    assert c1.with_model("a") is c1 and c1.with_model("") is c1  # same / no model -> same client
+    c2 = c1.with_model("b")
+    assert c2 is not c1 and c2.budget is budget
+    c2.complete([{"role": "user", "content": "x"}], role="sleep", max_tokens=5)
+    assert budget.used == 100 and budget.sleep_calls == 1 and budget.agent_calls == 0
+    assert t.log[0] == ("b", "agent")  # routed on message content, not the client's role
+
+
+def test_with_model_returns_the_same_client_for_unretargetable_transports():
+    client = LLMClient(Budget(100), MockTransport())
+    assert client.with_model("b") is client
+
+
+def test_sleep_model_routes_sleep_calls_to_a_second_model(run_dir, mock_cfg):
+    """cfg.sleep_model swaps the LLM client for sleep calls only; agent calls keep the base
+    transport, both roles charge the same budget, and cost prices each role at its model."""
+    log = []
+    llm = LLMClient(Budget(1000), _CloneableTransport("gpt-5-nano", log), sleep_fn=lambda s: None)
+    s = run(mock_cfg(sleep_model="gpt-5-mini"), TextEvaluator(), llm, Summarize(every_n=3),
+            out_dir=run_dir)
+    assert [r for _, r in log].count("agent") == 8 and [r for _, r in log].count("sleep") == 2
+    assert {m for m, r in log if r == "agent"} == {"gpt-5-nano"}
+    assert {m for m, r in log if r == "sleep"} == {"gpt-5-mini"}
+    assert s["sleep_model"] == "gpt-5-mini"
+    agent_exp = (8 * (60 * 0.05 + 40 * 0.40)) / 1e6      # agent role at gpt-5-nano prices
+    sleep_exp = (2 * (60 * 0.25 + 40 * 2.00)) / 1e6      # sleep role at gpt-5-mini prices
+    assert s["cost"]["by_role"]["agent"] == pytest.approx(agent_exp)
+    assert s["cost"]["by_role"]["sleep"] == pytest.approx(sleep_exp)
+    assert s["cost"]["total"] == pytest.approx(agent_exp + sleep_exp)
+
+
+def test_llm_sleep_model_env_wins_over_the_config(run_dir, mock_llm, mock_cfg, monkeypatch):
+    llm, _, _ = mock_llm(1000)
+    monkeypatch.setenv("LLM_SLEEP_MODEL", "env-model")
+    with pytest.warns(UserWarning, match="sleep_model"):
+        s = run(mock_cfg(sleep_model="cfg-model"), TextEvaluator(), llm, Summarize(every_n=3),
+                out_dir=run_dir)
+    assert s["sleep_model"] == "env-model"
+
+
 # ================================================================================================
 # Section 2 · Evaluators
 # ================================================================================================

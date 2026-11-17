@@ -257,6 +257,12 @@ def run(
     env_model = os.environ.get("LLM_MODEL")
     if cfg.model and env_model and cfg.model != env_model:
         warnings.warn(f"config model {cfg.model!r} != LLM_MODEL {env_model!r}; calls use LLM_MODEL")
+    env_sleep_model = os.environ.get("LLM_SLEEP_MODEL")
+    if cfg.sleep_model and env_sleep_model and cfg.sleep_model != env_sleep_model:
+        warnings.warn(f"config sleep_model {cfg.sleep_model!r} != LLM_SLEEP_MODEL "
+                      f"{env_sleep_model!r}; sleep calls use LLM_SLEEP_MODEL")
+    sleep_model = env_sleep_model or cfg.sleep_model
+    sleep_llm = llm.with_model(sleep_model) if sleep_model else llm
 
     awake_tags = cfg.awake_tags if cfg.awake_tags is not None else bool(getattr(policy, "awake_tags", False))
     caps = [c for c in (cfg.context_cap_tokens, getattr(policy, "context_cap_tokens", None)) if c]
@@ -395,7 +401,7 @@ def run(
             if hasattr(policy, "last_metrics"):
                 policy.last_metrics = {}
             try:
-                block = policy.sleep(evaluator.description, block, history, llm, budget)
+                block = policy.sleep(evaluator.description, block, history, sleep_llm, budget)
             except BudgetExhausted:
                 commit_step(rec)
                 stop_reason = "budget_exhausted"
@@ -466,11 +472,12 @@ def run(
         },
         "llm_model": env_model,
         "config_model": cfg.model,
+        "sleep_model": sleep_model,
         "wallclock_s": round(time.monotonic() - t0, 3),
         "error": str(billing_error) if billing_error is not None else None,
         "config": cfg.model_dump(),
     }
-    summary.update(usage_summary(llm, budget, cfg))
+    summary.update(usage_summary(llm, budget, cfg, sleep_llm))
     try:  # summary metrics (harness/metrics.py); a bug there must not lose the run's outputs
         summary["metrics"] = compute_run_metrics(
             history, best_known=evaluator.best_known, total_budget=budget.total_tokens, budget=budget.snapshot(),
@@ -485,13 +492,28 @@ def run(
     return summary
 
 
-def usage_summary(llm: object, budget: object, cfg: RunConfig) -> dict:
+def usage_summary(llm: object, budget: object, cfg: RunConfig, sleep_llm: object | None = None) -> dict:
     """summary.json `usage`, `llm_params` and `cost` (shared with the GEPA arms).
 
     The priced model is the one actually called (the transport's model, i.e. LLM_MODEL), else the
-    config's `model` (mock runs)."""
+    config's `model` (mock runs). When `sleep_llm` is a different model (RunConfig.sleep_model /
+    LLM_SLEEP_MODEL), the `sleep` role is priced at that model and the agent role at the agent's."""
     params = getattr(llm, "chat_params", None)
     model = getattr(llm, "model", None) or cfg.model
+    sleep_model = getattr(sleep_llm, "model", None) if sleep_llm is not None else None
     usage = budget.usage_breakdown()
+    table = price_table(cfg.prices)
+    cost = cost_block(usage, model, table)
+    if sleep_model and sleep_model != model:
+        scost = cost_block(usage, sleep_model, table)
+        a, s = cost["by_role"]["agent"], scost["by_role"]["sleep"]
+        cost["sleep_model"] = sleep_model
+        cost["sleep_price_per_1m"] = scost["price_per_1m"]
+        cost["by_role"]["sleep"] = s
+        cost["total"] = round(a + s, 6) if a is not None and s is not None else None
+        cost["complete"] = cost["total"] is not None
+        cost["notes"] += [f"sleep role priced at {sleep_model!r}"] + scost["notes"]
+    sparams = getattr(sleep_llm, "chat_params", None)
     return {"usage": usage, "llm_params": params.to_dict() if params is not None else None,
-            "cost": cost_block(usage, model, price_table(cfg.prices))}
+            "sleep_llm_params": sparams.to_dict() if sparams is not None else None,
+            "cost": cost}

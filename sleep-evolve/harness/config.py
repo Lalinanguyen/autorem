@@ -98,6 +98,12 @@ class RunConfig(BaseModel):
         None,
         description="Expected model name. The harness calls LLM_MODEL; a mismatch is logged as a warning.",
     )
+    sleep_model: str | None = Field(
+        None,
+        description="Model for sleep-phase LLM calls (consolidation, schemas, dreamer); null = the "
+                    "agent model. Sleep calls still charge the same Budget under role 'sleep'. "
+                    "LLM_SLEEP_MODEL env wins over this field; applies to every sleeping arm.",
+    )
     serve: ServeConfig = Field(default_factory=ServeConfig)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     prices: dict[str, ModelPrice] = Field(

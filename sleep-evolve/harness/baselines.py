@@ -281,8 +281,9 @@ def llm_identity(cfg: RunConfig) -> dict:
         params = resolve_chat_params(cfg.model, cfg.llm, warn=False).to_dict()
     except ValueError as e:
         params = {"error": str(e)}
-    return {"model": cfg.model, "llm": cfg.llm.model_dump(), "resolved": params,
-            "prices": {k: v.model_dump() for k, v in sorted(cfg.prices.items())}, "max_dollars": cfg.max_dollars}
+    return {"model": cfg.model, "sleep_model": cfg.sleep_model, "llm": cfg.llm.model_dump(),
+            "resolved": params, "prices": {k: v.model_dump() for k, v in sorted(cfg.prices.items())},
+            "max_dollars": cfg.max_dollars}
 
 
 def drift_problems(suite: Suite, cfgs: Iterable[RunConfig]) -> list[str]:

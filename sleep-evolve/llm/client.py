@@ -98,7 +98,7 @@ def _billing(e: Any) -> BillingError | None:
 
 class OpenAICompatTransport:
     def __init__(self, base_url: str, api_key: str, model: str, request_timeout_s: float = 600.0,
-                 params: ChatParams | None = None):
+                 params: ChatParams | None = None, settings: Any = None):
         import openai
 
         self._openai = openai
@@ -108,6 +108,17 @@ class OpenAICompatTransport:
         )
         self.model = model
         self.params = params or resolve_chat_params(model, env={}, warn=False)
+        self._base_url = base_url
+        self._api_key = api_key
+        self._request_timeout_s = request_timeout_s
+        self._settings = settings
+
+    def with_model(self, model: str) -> "OpenAICompatTransport":
+        """Same endpoint/credentials/timeout on a different chat model; params re-resolved for it."""
+        return OpenAICompatTransport(self._base_url, self._api_key, model,
+                                     request_timeout_s=self._request_timeout_s,
+                                     params=resolve_chat_params(model, self._settings, warn=False),
+                                     settings=self._settings)
 
     def __call__(self, messages: list[Message], max_tokens: int) -> LLMResponse:
         oa = self._openai
@@ -161,9 +172,20 @@ class LLMClient:
         model = os.environ["LLM_MODEL"]
         transport = OpenAICompatTransport(
             os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"], model,
-            params=resolve_chat_params(model, settings),
+            params=resolve_chat_params(model, settings), settings=settings,
         )
         return cls(budget, transport, **kwargs)
+
+    def with_model(self, model: str) -> "LLMClient":
+        """Same budget and retry policy on a different chat model (e.g. sleep calls on a stronger
+        model than the agent's). Transports that can re-target themselves (`with_model`) get a
+        cloned transport; transports that can't (mock) return the same client unchanged."""
+        retarget = getattr(self._transport, "with_model", None)
+        if retarget is None or not model or getattr(self._transport, "model", None) == model:
+            return self
+        return LLMClient(self._budget, retarget(model), max_retries=self.max_retries,
+                         backoff_base_s=self.backoff_base_s, backoff_max_s=self.backoff_max_s,
+                         sleep_fn=self._sleep)
 
     @property
     def budget(self) -> Budget:

@@ -85,6 +85,8 @@ metrics:
 eval_backend: local
 eval_timeout_s: 60
 model: gpt-5-nano
+sleep_model: gpt-5-mini   # sleep-phase calls (consolidation, schemas, dreamer) run on mini;
+                          # waking agent calls stay on nano; same token budget either way
 llm:
   token_param: auto
   reasoning_effort: low
