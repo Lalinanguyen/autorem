@@ -73,6 +73,19 @@ class BillingError(Exception):
         self.status, self.code = status, code
 
 
+class AuthError(BillingError):
+    """HTTP 401/403 from the provider (expired, revoked or invalid API key; no model access).
+
+    A BillingError subclass so every existing handler stops the run and the matrix cleanly
+    (stop_reason "billing_error") instead of crashing; never retried."""
+
+    def __init__(self, message: str, *, status: int | None = None, code: str | None = None):
+        Exception.__init__(
+            self, f"authentication/permission error from the LLM provider (HTTP {status}, {code}): {message}. "
+            "Retrying cannot help: replace LLM_API_KEY (expired or revoked key?) or check model access, then rerun.")
+        self.status, self.code = status, code
+
+
 def is_billing_error(code: Any = None, type_: Any = None) -> bool:
     return any(isinstance(x, str) and x in BILLING_ERROR_CODES for x in (code, type_))
 

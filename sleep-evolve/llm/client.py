@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal, Protocol
 
 from harness.budget import Budget, Role
-from llm.chat_params import BillingError, ChatParams, is_billing_error, parse_usage, resolve_chat_params
+from llm.chat_params import AuthError, BillingError, ChatParams, is_billing_error, parse_usage, resolve_chat_params
 
 Message = dict  # {"role": "system"|"user"|"assistant", "content": str}
 
@@ -130,6 +130,8 @@ class OpenAICompatTransport:
             billing = _billing(e)
             if billing is not None:
                 raise billing from e
+            if e.status_code in (401, 403):  # expired/revoked key or no access: stop cleanly, never retry
+                raise AuthError(str(e)[:500], status=e.status_code, code=getattr(e, "code", None)) from e
             if e.status_code == 429 or e.status_code >= 500:
                 raise TransientLLMError(f"HTTP {e.status_code}: {e}") from e
             raise

@@ -837,6 +837,26 @@ def test_billing_errors_are_not_retried(code, type_):
     assert billing_error_from_body(429, {"error": {"code": "slow_down", "type": "rate_limit_error"}}) is None
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_expired_or_invalid_key_stops_cleanly_and_is_not_retried(status):
+    from llm.chat_params import AuthError
+    t = OpenAICompatTransport("http://127.0.0.1:9/v1", "sk-test", "gpt-5-mini")
+    calls = []
+
+    def create(**kw):
+        calls.append(kw)
+        raise _status_error(status, "invalid_api_key", "invalid_request_error")
+
+    t._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    delays = []
+    budget = Budget(1000)
+    with pytest.raises(AuthError, match="replace LLM_API_KEY") as ei:
+        LLMClient(budget, t, sleep_fn=delays.append).complete([{"role": "user", "content": "x"}], role="agent",
+                                                              max_tokens=10)
+    assert isinstance(ei.value, BillingError)  # so the loop/matrix stop handlers catch it
+    assert len(calls) == 1 and delays == [] and budget.used == 0
+
+
 def test_loop_billing_error_stops_the_run_writes_outputs_and_reraises(run_dir, mock_cfg):
     class BillingAfter:
         def __init__(self, n):
