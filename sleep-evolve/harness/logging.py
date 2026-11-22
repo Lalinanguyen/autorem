@@ -59,6 +59,11 @@ lines and in writers that do not use the loop's agent, e.g. the GEPA arms):
   parent_truncated   bool | null      the parent program shown to the agent was truncated (context cap)
   full_rewrite_reason str | null    full: the reply's FULL_REWRITE_REASON line (asked for in auto mode; harness/edits.py
                                       parse_full_rewrite_reason), null when absent or not a full rewrite
+  search_blocks      int | null       SEARCH copy fidelity (harness/edits.py search_copy_fidelity): SEARCH
+                                      blocks parsed from the reply, applied or not; null = no parseable blocks
+  search_blocks_exact int | null      blocks copied from the parent exactly
+  search_blocks_near int | null       near-miss copies (not found, but best window similarity >= 0.9)
+  search_copy_score  float | null     mean best-window similarity of the SEARCH blocks (1.0 = exact copy)
   `program` is always the FULL resulting program (the diff already applied), or "" without one.
 
 Fatigue (harness/fatigue.py; every arm, every line; null when fatigue is disabled or the writer,
@@ -111,7 +116,8 @@ USAGE_FIELDS = ("llm_calls", "llm_prompt_tokens", "llm_completion_tokens", "llm_
                 "llm_reasoning_tokens")
 
 EDIT_FIELDS = ("edit_mode", "edit_kind", "diff_blocks", "diff_lines_changed", "diff_fuzzy_blocks", "diff_error",
-               "parent_truncated", "full_rewrite_reason")
+               "parent_truncated", "full_rewrite_reason",
+               "search_blocks", "search_blocks_exact", "search_blocks_near", "search_copy_score")
 
 FIELDS = (
     "run_id", "step", "parent_id", "program_id", "program", "score", "valid", "error",

@@ -256,7 +256,8 @@ def around_steps(steps: list[dict], sleep_steps: Iterable[int], window: int, bes
 
 EDIT_KEYS = ("full_steps", "diff_steps", "no_code_steps", "diff_valid", "diff_apply_failures", "full_rejected",
              "diff_salvaged", "parent_truncated_steps", "diffs_forbidden_steps", "fuzzy_blocks",
-             "diff_lines_changed_mean", "diff_share", "full_with_reason", "full_rewrite_reasons")
+             "diff_lines_changed_mean", "diff_share", "full_with_reason", "full_rewrite_reasons",
+             "search_blocks", "search_exact_share", "search_near_miss_blocks", "search_copy_score_mean")
 SLEEP_EDIT_KEYS = tuple(f"{who}_{k}" for who in ("replay", "dream") for k in (
     "control_ref", "control_full", "treatment_diff", "treatment_full", "diff_failures", "base_missing"))
 
@@ -301,6 +302,24 @@ def edit_counts(history: Iterable[dict], edit_mode: str | None = None) -> dict:
         "diff_share": round(len(diff) / len(agent), 6),
         "full_with_reason": sum(1 for h in full if h.get("full_rewrite_reason")),
         "full_rewrite_reasons": reasons,
+        **_search_copy_totals(agent),
+    }
+
+
+def _search_copy_totals(agent: list[dict]) -> dict:
+    """SEARCH copy fidelity over every step whose reply had parseable SEARCH blocks (applied or not).
+    search_copy_score_mean is block-weighted; all null when no step attempted a diff."""
+    rows = [h for h in agent if isinstance(h.get("search_blocks"), int) and h["search_blocks"] > 0]
+    n = sum(h["search_blocks"] for h in rows)
+    if not n:
+        return {"search_blocks": 0 if agent else None, "search_exact_share": None,
+                "search_near_miss_blocks": None, "search_copy_score_mean": None}
+    score = sum((h.get("search_copy_score") or 0.0) * h["search_blocks"] for h in rows) / n
+    return {
+        "search_blocks": n,
+        "search_exact_share": round(sum(int(h.get("search_blocks_exact") or 0) for h in rows) / n, 6),
+        "search_near_miss_blocks": sum(int(h.get("search_blocks_near") or 0) for h in rows),
+        "search_copy_score_mean": round(score, 6),
     }
 
 

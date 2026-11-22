@@ -383,6 +383,11 @@ def run(
             "diff_error": edit.diff_error, "parent_truncated": bool(ctx["program_truncated"]),
             "full_rewrite_reason": parse_full_rewrite_reason(resp.text) if edit.kind == "full" else None,
         }
+        copy = edit.stats.get("copy") or {}
+        edit_fields.update({
+            "search_blocks": copy.get("blocks"), "search_blocks_exact": copy.get("exact"),
+            "search_blocks_near": copy.get("near"), "search_copy_score": copy.get("copy_score"),
+        })
         rec = record(step, Program(f"p{step}", code or "", result.score if result.valid else INVALID_SCORE,
                                    result.valid, parent.id, step), result, awake, ctx["tokens"], edit_fields)
         steps_done = step

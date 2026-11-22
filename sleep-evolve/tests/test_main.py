@@ -2172,6 +2172,37 @@ def test_loop_logs_the_applied_program_and_a_failed_diff_is_an_invalid_step(run_
     assert (e["full_steps"], e["diff_steps"], e["no_code_steps"], e["diff_valid"], e["diff_apply_failures"]) == \
         (1, 2, 1, 1, 1)
     assert e["diff_share"] == 0.5 and e["parent_truncated_steps"] == 0 and e["diffs_forbidden_steps"] == 0
+    # SEARCH copy fidelity: measured on both diff attempts (applied and failed), absent otherwise
+    assert (h1["search_blocks"], h1["search_blocks_exact"], h1["search_copy_score"]) == (1, 1, 1.0)
+    assert h2["search_blocks"] == 1 and h2["search_blocks_exact"] == 0 and h2["search_copy_score"] < 1.0
+    assert h3["search_blocks"] is None and h4["search_copy_score"] is None
+    assert e["search_blocks"] == 2 and e["search_exact_share"] == 0.5
+    assert e["search_copy_score_mean"] == pytest.approx((1.0 + h2["search_copy_score"]) / 2)
+
+
+def test_search_copy_fidelity_tiers_exact_whitespace_near_and_miss():
+    from harness.edits import search_copy_fidelity
+    f = search_copy_fidelity(PARENT, sr("    xs = [0.0] * n", "    xs = [0.7] * n"))
+    assert (f["blocks"], f["exact"], f["copy_score"]) == (1, 1, 1.0)
+    f = search_copy_fidelity(PARENT, sr("        xs = [0.0] * n", "x"))  # indentation drift only
+    assert (f["exact"], f["whitespace"], f["near"], f["miss"]) == (0, 1, 0, 0) and f["copy_score"] < 1.0
+    f = search_copy_fidelity(PARENT, sr("    xs = [0.0] * m", "x"))  # one character off: a near-miss copy
+    assert (f["near"], f["miss"]) == (1, 0) and 0.9 <= f["copy_score"] < 1.0
+    f = search_copy_fidelity(PARENT, sr("    totally_new_line(42)", "x"))  # not from the parent at all
+    assert (f["miss"], f["exact"]) == (1, 0) and f["copy_score"] < 0.9
+    two = sr("import math", "import math, random") + sr("    return ys", "    return xs")
+    f = search_copy_fidelity(PARENT, two)
+    assert (f["blocks"], f["exact"]) == (2, 1) and f["min_similarity"] < 1.0
+    assert search_copy_fidelity(PARENT, "```python\nprint(1)\n```") is None  # no SEARCH blocks
+    assert search_copy_fidelity(PARENT, "<<<<<<< SEARCH\nfoo\n") is None     # malformed: not measured
+
+
+def test_search_copy_fidelity_is_a_measure_only_and_never_changes_the_edit_outcome():
+    reply = sr("    xs = [0.0] * m", "    xs = [0.7] * n")  # near miss: still fails to apply
+    out = decide_edit(reply, PARENT, "auto")
+    assert out.code is None and "not found" in out.error and out.stats["copy"]["near"] == 1
+    out = decide_edit("```python\n" + PARENT + "```", PARENT, "full")
+    assert out.code == PARENT and "copy" not in out.stats  # full mode: nothing to measure
 
 
 def test_full_mode_ignores_diffs_and_diff_mode_rejects_full_rewrites_in_the_loop(run_dir, mock_llm, mock_cfg):
@@ -4160,9 +4191,9 @@ def test_drift_check_catches_an_arm_with_a_different_edit_mode(suite):
     auto = make_suite(suite.base.model_copy(update={"edit_mode": "auto"}), suite.section)
     jobs = plan_suite(auto, [0], [0])  # the same edit_mode in every arm passes
     assert {j.cfg.edit_mode for j in jobs} == {"auto"}
-    for name in ("debug_openai", "pilot_openai", "baselines_openai"):
+    for name in ("debug_openai", "pilot_openai", "baselines_openai"):  # full rewrites (diffs failed 33-40% on nano)
         s = load_suite(ROOT / "configs" / f"{name}.yaml")
-        assert {j.cfg.edit_mode for j in plan_suite(s, [36], [0])} == {"auto"}
+        assert {j.cfg.edit_mode for j in plan_suite(s, [36], [0])} == {"full"}
 
 
 # ================================================================================================

@@ -285,6 +285,61 @@ def lines_changed(a: str, b: str) -> int:
     return n
 
 
+NEAR_COPY_THRESHOLD = 0.9
+
+
+def search_copy_fidelity(parent: str, text: str, *, near: float = NEAR_COPY_THRESHOLD) -> dict | None:
+    """How faithfully each SEARCH block was copied from the parent. A measure only: it never
+    changes whether a diff applies (apply_blocks decides that).
+
+    Per block, against every window of the parent with the same number of lines:
+      exact       an identical window exists
+      whitespace  identical once each line is stripped of leading/trailing whitespace
+      near        the most similar window has difflib ratio >= `near` (a near-miss copy)
+      miss        anything else (the model wrote lines that are not in the parent)
+    `copy_score` is the mean over blocks of the best window similarity (1.0 = exact copy).
+    Returns None when the reply has no parseable SEARCH/REPLACE blocks."""
+    try:
+        blocks = parse_blocks(text)
+    except DiffError:
+        return None
+    src = _norm(parent)
+    lines = src.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    out = {"blocks": len(blocks), "exact": 0, "whitespace": 0, "near": 0, "miss": 0}
+    sims = []
+    for blk in blocks:
+        k = len(blk.search)
+        if k == 0 or not lines:
+            out["miss"] += 1
+            sims.append(0.0)
+            continue
+        if _occurrences(lines, blk.search):
+            out["exact"] += 1
+            sims.append(1.0)
+            continue
+        needle = "\n".join(blk.search)
+        best = 0.0
+        sm = difflib.SequenceMatcher(None, autojunk=False)
+        sm.set_seq2(needle)
+        for i in range(max(1, len(lines) - k + 1)):
+            sm.set_seq1("\n".join(lines[i:i + k]))
+            if sm.real_quick_ratio() <= best or sm.quick_ratio() <= best:
+                continue
+            best = max(best, sm.ratio())
+        if _occurrences(lines, blk.search, key=str.strip):
+            out["whitespace"] += 1
+        elif best >= near:
+            out["near"] += 1
+        else:
+            out["miss"] += 1
+        sims.append(best)
+    out["copy_score"] = round(sum(sims) / len(sims), 6)
+    out["min_similarity"] = round(min(sims), 6)
+    return out
+
+
 def apply_diff(parent: str, text: str, *, allow_indent_fuzzy: bool = False) -> tuple[str, dict]:
     """parse_blocks + apply_blocks. Raises DiffError."""
     return apply_blocks(parent, parse_blocks(text), allow_indent_fuzzy=allow_indent_fuzzy)
@@ -310,14 +365,15 @@ def decide_edit(text: str, parent: str, mode: EditMode, *, diffs_forbidden: bool
         code = extract_program(text)
         return EditOutcome(code, "full" if code else None, None if code else NO_CODE_FULL)
     if markers:
+        copy = {"copy": search_copy_fidelity(parent, text)}  # measured whether or not the diff applies
         try:
             code, stats = apply_diff(parent, text)
         except DiffError as e:
             code = extract_program(text) if mode == "auto" else None  # salvage: the reply's
             if code:                                                  # fenced program stands alone
-                return EditOutcome(code, "full", None, str(e))
-            return EditOutcome(None, "diff", str(e), str(e))
-        return EditOutcome(code, "diff", None, None, stats)
+                return EditOutcome(code, "full", None, str(e), copy)
+            return EditOutcome(None, "diff", str(e), str(e), copy)
+        return EditOutcome(code, "diff", None, None, {**stats, **copy})
     code = extract_program(text)
     if mode == "auto":
         return EditOutcome(code, "full" if code else None, None if code else NO_CODE_AUTO)
@@ -329,5 +385,5 @@ def decide_edit(text: str, parent: str, mode: EditMode, *, diffs_forbidden: bool
 __all__ = [
     "DIFF_FAILED", "DiffError", "EDIT_MODES", "EditBlock", "EditMode", "EditOutcome", "apply_blocks", "apply_diff",
     "decide_edit", "extract_program", "first_marker_offset", "has_diff_markers", "lines_changed", "parse_blocks",
-    "parse_full_rewrite_reason", "reason_category",
+    "parse_full_rewrite_reason", "reason_category", "search_copy_fidelity",
 ]

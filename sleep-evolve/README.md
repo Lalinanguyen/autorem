@@ -105,9 +105,18 @@ parent (`harness/edits.py`, aider/OpenEvolve format):
 ```
 
 Every block must match the parent exactly once (exact whole-line match first, then a
-trailing-whitespace-only fallback). `full` (default) is the original behavior; `diff` accepts
-diffs only; `auto` (used by the `*_openai.yaml` configs) makes diffs the default and allows a
-full rewrite only with a `FULL_REWRITE_REASON:` line, which is logged and counted. A failed diff
+trailing-whitespace-only fallback). `full` (default, and what the `*_openai.yaml` configs use:
+gpt-5-nano failed 33-40% of its diffs) is the original behavior; `diff` accepts diffs only;
+`auto` makes diffs the default and allows a full rewrite only with a `FULL_REWRITE_REASON:` line,
+which is logged and counted.
+
+**SEARCH copy fidelity.** Whenever a reply contains SEARCH blocks, `search_copy_fidelity` measures
+how faithfully each one was copied from the parent: `exact`, `whitespace` (identical once lines
+are stripped), `near` (not found, but best window similarity >= 0.9), or `miss`, plus a mean
+`search_copy_score` (1.0 = exact copy). It is a measure only and never changes whether a diff
+applies. Per step: `search_blocks`, `search_blocks_exact`, `search_blocks_near`,
+`search_copy_score`; per run: `summary.metrics.edits.search_*`. Use it to judge whether a model is
+capable of diffs before switching a config to `auto`. A failed diff
 is an invalid step (`diff_error`, counted as fatigue sloppiness), never a crash — except that in
 `auto` mode a fenced full program in the same reply is used instead (kind `full`, `diff_error`
 records the failed diff, `metrics.edits.diff_salvaged` counts it). If the parent had to be
