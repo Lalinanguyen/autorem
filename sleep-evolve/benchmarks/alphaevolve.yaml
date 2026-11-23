@@ -132,13 +132,15 @@ problems:
     paper_ref: "arXiv:2511.02864v3 Problem 6.7 (page: 'Section 6.3')"
     status: world_record
     status_raw: world_record
-    evaluator: pending
+    evaluator: "evaluators.p7_difference_bases:DifferenceBasis"
     instances:
       - id: difference_basis_upper
         params: {set: nonnegative_integers, n: free, max_set_size: 2000}
         quantity: "upper bound on C = |B|^2 / n, n = largest integer with 1..n all differences of B (notebook get_score)"
         direction: minimize
         score_transform: negate
+        construction: "tests/data/p7_alphaevolve_basis.json"
+        published_scorer: p7_get_score
         alphaevolve_value:
           value: 2.639027469506608
           source: "experiments/difference_bases/difference_bases.ipynb cell 1 (A=[0,1,4,6], Singer set B, m=89^2+89+1 -> |B|=360 covering 1..49109), computed with a port of get_score; paper Problem 6.7: 2.6571 -> 2.6390"
@@ -438,7 +440,7 @@ problems:
     paper_ref: "arXiv:2511.02864v3 Problem 6.50 (page: 'Section 6.30'), Figure 27"
     status: world_record
     status_raw: world_record
-    evaluator: pending
+    evaluator: "evaluators.p50_max_min_ratio:MaxMinRatio16"
     instance_note: "Values are the SQUARED max/min distance ratio (Friedman's and the colab's convention). OpenEvolve's evaluator maximizes 1/ratio^2: convert before comparing."
     instances:
       - id: d2_n16
@@ -446,6 +448,8 @@ problems:
         quantity: "(max pairwise distance / min pairwise distance)^2"
         direction: minimize
         score_transform: negate
+        construction: "tests/data/p50_alphaevolve_d2n16.json"
+        published_scorer: p50_ratio_squared
         alphaevolve_value:
           value: 12.88926611203463
           source: "alphaevolve_results mathematical_results.ipynb cell 93 (construction_1), computed as in cell 94; colab cell 92 and paper Problem 6.50: ratio ~ sqrt(12.889266112)"
@@ -516,7 +520,7 @@ problems:
     paper_ref: "arXiv:2511.02864v3 Problem 6.59 (page: 'Section 6.39'), Figure 30"
     status: world_record
     status_raw: world_record
-    evaluator: pending
+    evaluator: "evaluators.p59_no_isosceles:NoIsoscelesGrid64"
     instance_note: "The notebook uses 0-based coordinates {0..n-1}^2; the page defines [n]^2 = {1..n}^2 (equivalent by translation). The validity check must be exact integer arithmetic."
     instances:
       - id: grid64
@@ -524,6 +528,8 @@ problems:
         quantity: "size of a subset of the n x n grid with no (possibly flat) isosceles triangle"
         direction: maximize
         score_transform: identity
+        construction: "tests/data/p59_alphaevolve_n64.json"
+        published_scorer: p59_verify_construction
         alphaevolve_value:
           value: 112
           source: "experiments/subsets_of_the_grid_with_no_isosceles_triangles/...ipynb cell 1 (sol_64: 112 points, re-verified exactly with integer squared distances); paper Problem 6.59"

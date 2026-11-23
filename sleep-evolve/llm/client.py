@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal, Protocol
 
 from harness.budget import Budget, Role
-from llm.chat_params import BillingError, ChatParams, is_billing_error, parse_usage, resolve_chat_params
+from llm.chat_params import AuthError, BillingError, ChatParams, is_billing_error, parse_usage, resolve_chat_params
 
 Message = dict  # {"role": "system"|"user"|"assistant", "content": str}
 
@@ -45,10 +45,20 @@ def strip_think(text: str) -> str:
     (or in a separate `reasoning_content` field, which we ignore — it's already out of
     `content`). Stripping keeps downstream parsers (code extraction, consolidator JSON)
     from ever seeing the reasoning trace. ChatParams.thinking is the on/off switch; this
-    function is unconditional and harmless when no tags are present."""
-    if "<think>" not in text:
+    function is unconditional and harmless when no tags are present.
+
+    Partial traces are dropped too: a stray "</think>" without its opening tag (chat templates
+    that put "<think>" in the prompt, so the reply starts mid-reasoning) drops everything up to
+    and including the last "</think>"; an unterminated "<think>" (reply cut off by max_tokens
+    while still reasoning) drops everything from it to the end."""
+    if "<think>" not in text and "</think>" not in text:
         return text
-    return _THINK_RE.sub("", text).strip()
+    out = _THINK_RE.sub("", text)
+    if "</think>" in out:
+        out = out.rsplit("</think>", 1)[1]
+    if "<think>" in out:
+        out = out.split("<think>", 1)[0]
+    return out.strip()
 
 
 @dataclass(frozen=True)
@@ -88,7 +98,7 @@ def _billing(e: Any) -> BillingError | None:
 
 class OpenAICompatTransport:
     def __init__(self, base_url: str, api_key: str, model: str, request_timeout_s: float = 600.0,
-                 params: ChatParams | None = None):
+                 params: ChatParams | None = None, settings: Any = None):
         import openai
 
         self._openai = openai
@@ -98,6 +108,17 @@ class OpenAICompatTransport:
         )
         self.model = model
         self.params = params or resolve_chat_params(model, env={}, warn=False)
+        self._base_url = base_url
+        self._api_key = api_key
+        self._request_timeout_s = request_timeout_s
+        self._settings = settings
+
+    def with_model(self, model: str) -> "OpenAICompatTransport":
+        """Same endpoint/credentials/timeout on a different chat model; params re-resolved for it."""
+        return OpenAICompatTransport(self._base_url, self._api_key, model,
+                                     request_timeout_s=self._request_timeout_s,
+                                     params=resolve_chat_params(model, self._settings, warn=False),
+                                     settings=self._settings)
 
     def __call__(self, messages: list[Message], max_tokens: int) -> LLMResponse:
         oa = self._openai
@@ -109,6 +130,8 @@ class OpenAICompatTransport:
             billing = _billing(e)
             if billing is not None:
                 raise billing from e
+            if e.status_code in (401, 403):  # expired/revoked key or no access: stop cleanly, never retry
+                raise AuthError(str(e)[:500], status=e.status_code, code=getattr(e, "code", None)) from e
             if e.status_code == 429 or e.status_code >= 500:
                 raise TransientLLMError(f"HTTP {e.status_code}: {e}") from e
             raise
@@ -151,9 +174,20 @@ class LLMClient:
         model = os.environ["LLM_MODEL"]
         transport = OpenAICompatTransport(
             os.environ["LLM_BASE_URL"], os.environ["LLM_API_KEY"], model,
-            params=resolve_chat_params(model, settings),
+            params=resolve_chat_params(model, settings), settings=settings,
         )
         return cls(budget, transport, **kwargs)
+
+    def with_model(self, model: str) -> "LLMClient":
+        """Same budget and retry policy on a different chat model (e.g. sleep calls on a stronger
+        model than the agent's). Transports that can re-target themselves (`with_model`) get a
+        cloned transport; transports that can't (mock) return the same client unchanged."""
+        retarget = getattr(self._transport, "with_model", None)
+        if retarget is None or not model or getattr(self._transport, "model", None) == model:
+            return self
+        return LLMClient(self._budget, retarget(model), max_retries=self.max_retries,
+                         backoff_base_s=self.backoff_base_s, backoff_max_s=self.backoff_max_s,
+                         sleep_fn=self._sleep)
 
     @property
     def budget(self) -> Budget:

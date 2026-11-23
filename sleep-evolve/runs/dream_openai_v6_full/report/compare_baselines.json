@@ -1,0 +1,1433 @@
+{
+  "runs": 20,
+  "pairs": 4,
+  "arms": [
+    "no_sleep",
+    "fixed_letta",
+    "summarize",
+    "dream_unvalidated",
+    "dream"
+  ],
+  "alpha": 0.05,
+  "n_boot": 10000,
+  "bootstrap_seed": 0,
+  "arm_summaries": {
+    "no_sleep": {
+      "n_runs": 4,
+      "final_score_median": 0.8330641948229387,
+      "score_at_25_median": 0.7682660538091817,
+      "reached_95": 1,
+      "budget_to_95_median_reached": 0.153208,
+      "llm_sleeps_mean": 0.0,
+      "forgets_mean": 0.0,
+      "scheduled_vs_realized": [],
+      "sleep_share_of_budget_mean": 0.0,
+      "items_added_mean": 0.0,
+      "items_evicted_mean": 0.0,
+      "replays_wasted_mean": 0.0,
+      "dreams_validated_mean": 0.0,
+      "dreams_total_mean": null,
+      "dream_hit_rate_mean": null,
+      "evals_used_mean": 68.5,
+      "evals_agent_mean": 68.5,
+      "evals_sleep_mean": 0.0,
+      "evals_extra_mean": 0.0,
+      "edit_mode": "full",
+      "diff_share_mean": 0.0,
+      "full_steps_mean": 67.5,
+      "diff_steps_mean": 0.0,
+      "diff_apply_failures_mean": 0.0,
+      "parent_truncated_steps_mean": 0.0,
+      "cost_total": 0.206097,
+      "cost_mean": 0.051524,
+      "cost_unknown_runs": 0
+    },
+    "fixed_letta": {
+      "n_runs": 4,
+      "final_score_median": 0.9510932837796648,
+      "score_at_25_median": 0.8920283795476867,
+      "reached_95": 2,
+      "budget_to_95_median_reached": 0.209976,
+      "llm_sleeps_mean": 9.0,
+      "forgets_mean": 0.0,
+      "scheduled_vs_realized": [],
+      "sleep_share_of_budget_mean": 0.31888,
+      "items_added_mean": 14.0,
+      "items_evicted_mean": 1.5,
+      "replays_wasted_mean": 9.0,
+      "dreams_validated_mean": 0.0,
+      "dreams_total_mean": null,
+      "dream_hit_rate_mean": null,
+      "evals_used_mean": 74.25,
+      "evals_agent_mean": 48.75,
+      "evals_sleep_mean": 25.5,
+      "evals_extra_mean": 0.0,
+      "edit_mode": "full",
+      "diff_share_mean": 0.0,
+      "full_steps_mean": 47.75,
+      "diff_steps_mean": 0.0,
+      "diff_apply_failures_mean": 0.0,
+      "parent_truncated_steps_mean": 0.0,
+      "cost_total": 0.33789,
+      "cost_mean": 0.084473,
+      "cost_unknown_runs": 0
+    },
+    "summarize": {
+      "n_runs": 4,
+      "final_score_median": 0.9012457051564259,
+      "score_at_25_median": 0.8988370846641622,
+      "reached_95": 2,
+      "budget_to_95_median_reached": 0.06444,
+      "llm_sleeps_mean": 7.5,
+      "forgets_mean": 0.0,
+      "scheduled_vs_realized": [],
+      "sleep_share_of_budget_mean": 0.12993,
+      "items_added_mean": 0.0,
+      "items_evicted_mean": 0.0,
+      "replays_wasted_mean": 0.0,
+      "dreams_validated_mean": 0.0,
+      "dreams_total_mean": null,
+      "dream_hit_rate_mean": null,
+      "evals_used_mean": 41.0,
+      "evals_agent_mean": 41.0,
+      "evals_sleep_mean": 0.0,
+      "evals_extra_mean": 0.0,
+      "edit_mode": "full",
+      "diff_share_mean": 0.0,
+      "full_steps_mean": 40.0,
+      "diff_steps_mean": 0.0,
+      "diff_apply_failures_mean": 0.0,
+      "parent_truncated_steps_mean": 0.0,
+      "cost_total": 0.271233,
+      "cost_mean": 0.067808,
+      "cost_unknown_runs": 0
+    },
+    "dream_unvalidated": {
+      "n_runs": 4,
+      "final_score_median": 0.9393205660727919,
+      "score_at_25_median": 0.8543866315473527,
+      "reached_95": 1,
+      "budget_to_95_median_reached": 0.661796,
+      "llm_sleeps_mean": 3.0,
+      "forgets_mean": 13.0,
+      "scheduled_vs_realized": [],
+      "sleep_share_of_budget_mean": 0.196304,
+      "items_added_mean": 8.5,
+      "items_evicted_mean": 0.25,
+      "replays_wasted_mean": 3.0,
+      "dreams_validated_mean": 0.0,
+      "dreams_total_mean": 4.0,
+      "dream_hit_rate_mean": null,
+      "evals_used_mean": 68.5,
+      "evals_agent_mean": 58.5,
+      "evals_sleep_mean": 10.0,
+      "evals_extra_mean": 0.0,
+      "edit_mode": "full",
+      "diff_share_mean": 0.0,
+      "full_steps_mean": 57.5,
+      "diff_steps_mean": 0.0,
+      "diff_apply_failures_mean": 0.0,
+      "parent_truncated_steps_mean": 0.0,
+      "cost_total": 0.275875,
+      "cost_mean": 0.068969,
+      "cost_unknown_runs": 0
+    },
+    "dream": {
+      "n_runs": 4,
+      "final_score_median": 0.823766483013006,
+      "score_at_25_median": 0.7342888854312568,
+      "reached_95": 0,
+      "budget_to_95_median_reached": null,
+      "llm_sleeps_mean": 3.75,
+      "forgets_mean": 9.5,
+      "scheduled_vs_realized": [],
+      "sleep_share_of_budget_mean": 0.303161,
+      "items_added_mean": 17.0,
+      "items_evicted_mean": 0.5,
+      "replays_wasted_mean": 3.75,
+      "dreams_validated_mean": 1.0,
+      "dreams_total_mean": 6.0,
+      "dream_hit_rate_mean": 0.3611111111111111,
+      "evals_used_mean": 66.5,
+      "evals_agent_mean": 49.0,
+      "evals_sleep_mean": 17.5,
+      "evals_extra_mean": 0.0,
+      "edit_mode": "full",
+      "diff_share_mean": 0.0,
+      "full_steps_mean": 48.0,
+      "diff_steps_mean": 0.0,
+      "diff_apply_failures_mean": 0.0,
+      "parent_truncated_steps_mean": 0.0,
+      "cost_total": 0.30791,
+      "cost_mean": 0.076978,
+      "cost_unknown_runs": 0
+    }
+  },
+  "cost": {
+    "cost_total": 1.399005,
+    "cost_mean": 0.06995,
+    "cost_unknown_runs": 0
+  },
+  "behavior_around_sleep": {
+    "no_sleep": {
+      "reference": "own LLM sleeps",
+      "before": {
+        "perseveration_rate": null,
+        "invalid_rate": null,
+        "calibration_error": null
+      },
+      "after": {
+        "perseveration_rate": null,
+        "invalid_rate": null,
+        "calibration_error": null
+      }
+    },
+    "fixed_letta": {
+      "reference": "own LLM sleeps",
+      "before": {
+        "perseveration_rate": 0.6956944444444444,
+        "invalid_rate": 0.0725,
+        "calibration_error": 4.27263194965058
+      },
+      "after": {
+        "perseveration_rate": 0.7751388888888888,
+        "invalid_rate": 0.04958333333333333,
+        "calibration_error": 2.562858750985789
+      }
+    },
+    "summarize": {
+      "reference": "own LLM sleeps",
+      "before": {
+        "perseveration_rate": 0.6642857142857143,
+        "invalid_rate": 0.12589285714285714,
+        "calibration_error": 0.20707570305335415
+      },
+      "after": {
+        "perseveration_rate": 0.706547619047619,
+        "invalid_rate": 0.14479166666666665,
+        "calibration_error": 0.17504781468848846
+      }
+    },
+    "dream_unvalidated": {
+      "reference": "own LLM sleeps",
+      "before": {
+        "perseveration_rate": 0.7458333333333333,
+        "invalid_rate": 0.058333333333333334,
+        "calibration_error": 2363548.7280090754
+      },
+      "after": {
+        "perseveration_rate": 0.5,
+        "invalid_rate": 0.11666666666666667,
+        "calibration_error": 0.3271543698482974
+      }
+    },
+    "dream": {
+      "reference": "own LLM sleeps",
+      "before": {
+        "perseveration_rate": 0.7166666666666667,
+        "invalid_rate": 0.11666666666666667,
+        "calibration_error": 3.502829916533524
+      },
+      "after": {
+        "perseveration_rate": 0.5777777777777778,
+        "invalid_rate": 0.1236111111111111,
+        "calibration_error": 2.62217472653574
+      }
+    }
+  },
+  "contrasts": [
+    {
+      "question": "Q1",
+      "matching": "tokens",
+      "a": "fixed_letta",
+      "b": "no_sleep",
+      "outcome": "budget_to_95",
+      "label": "budget fraction to reach 95% of best_known",
+      "better": "lower",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.0,
+        -0.018488000000000004,
+        0.0,
+        -0.7147680000000001
+      ],
+      "median_diff": -0.009244000000000002,
+      "ci95": [
+        -0.7147680000000001,
+        0.0
+      ],
+      "p": 0.5,
+      "test": "exact (2^2 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 2,
+      "win": 2,
+      "tie": 2,
+      "loss": 0,
+      "censored_runs": 5,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q1",
+      "matching": "tokens",
+      "a": "fixed_letta",
+      "b": "no_sleep",
+      "outcome": "final_score",
+      "label": "final best normalized score",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.014649431689675585,
+        0.00012750643642323034,
+        0.0,
+        0.2507076096031279
+      ],
+      "median_diff": 6.375321821161517e-05,
+      "ci95": [
+        -0.014649431689675585,
+        0.2507076096031279
+      ],
+      "p": 0.75,
+      "test": "exact (2^3 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 1,
+      "win": 2,
+      "tie": 1,
+      "loss": 1,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q1",
+      "matching": "tokens",
+      "a": "fixed_letta",
+      "b": "no_sleep",
+      "outcome": "score_at_25",
+      "label": "best normalized score at 25% of budget",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.03749168545099757,
+        0.0027662677311842687,
+        0.0,
+        0.48709322439929126
+      ],
+      "median_diff": 0.02012897659109092,
+      "ci95": [
+        0.0,
+        0.48709322439929126
+      ],
+      "p": 0.25,
+      "test": "exact (2^3 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 1,
+      "win": 3,
+      "tie": 1,
+      "loss": 0,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q1",
+      "matching": "evals",
+      "a": "fixed_letta",
+      "b": "no_sleep",
+      "outcome": "score_at_matched_evals",
+      "label": "best normalized score at the pair's matched evaluator-call count",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.014649431689675585,
+        0.00012750643642323034,
+        0.0,
+        0.2507076096031279
+      ],
+      "median_diff": 6.375321821161517e-05,
+      "ci95": [
+        -0.014649431689675585,
+        0.2507076096031279
+      ],
+      "p": 0.75,
+      "test": "exact (2^3 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 1,
+      "win": 2,
+      "tie": 1,
+      "loss": 1,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant",
+      "matched_evaluations": [
+        64,
+        71,
+        63,
+        76
+      ]
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "fixed_letta",
+      "outcome": "budget_to_95",
+      "label": "budget fraction to reach 95% of best_known",
+      "better": "lower",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.0,
+        0.86528,
+        0.0,
+        0.7147680000000001
+      ],
+      "median_diff": 0.35738400000000003,
+      "ci95": [
+        0.0,
+        0.86528
+      ],
+      "p": 0.5,
+      "test": "exact (2^2 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 2,
+      "win": 0,
+      "tie": 2,
+      "loss": 2,
+      "censored_runs": 6,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "fixed_letta",
+      "outcome": "final_score",
+      "label": "final best normalized score",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.010641571026517749,
+        -0.2691179466735326,
+        0.0803571428571429,
+        -0.10995947789610871
+      ],
+      "median_diff": -0.06030052446131323,
+      "ci95": [
+        -0.2691179466735326,
+        0.0803571428571429
+      ],
+      "p": 0.375,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 1,
+      "tie": 0,
+      "loss": 3,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "fixed_letta",
+      "outcome": "score_at_25",
+      "label": "best normalized score at 25% of budget",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.005495875396231864,
+        -0.2660720434378029,
+        0.07142857142857151,
+        -0.21991895579221732
+      ],
+      "median_diff": -0.11270741559422459,
+      "ci95": [
+        -0.2660720434378029,
+        0.07142857142857151
+      ],
+      "p": 0.375,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 1,
+      "tie": 0,
+      "loss": 3,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "evals",
+      "a": "dream",
+      "b": "fixed_letta",
+      "outcome": "score_at_matched_evals",
+      "label": "best normalized score at the pair's matched evaluator-call count",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.010641571026517749,
+        -0.2691179466735326,
+        0.0803571428571429,
+        -0.10995947789610871
+      ],
+      "median_diff": -0.06030052446131323,
+      "ci95": [
+        -0.2691179466735326,
+        0.0803571428571429
+      ],
+      "p": 0.375,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 1,
+      "tie": 0,
+      "loss": 3,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant",
+      "matched_evaluations": [
+        63,
+        72,
+        67,
+        61
+      ]
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "no_sleep",
+      "outcome": "budget_to_95",
+      "label": "budget fraction to reach 95% of best_known",
+      "better": "lower",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.0,
+        0.846792,
+        0.0,
+        0.0
+      ],
+      "median_diff": 0.0,
+      "ci95": [
+        0.0,
+        0.846792
+      ],
+      "p": 1.0,
+      "test": "exact (2^1 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 3,
+      "win": 0,
+      "tie": 3,
+      "loss": 1,
+      "censored_runs": 7,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "no_sleep",
+      "outcome": "final_score",
+      "label": "final best normalized score",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.025291002716193334,
+        -0.2689904402371094,
+        0.0803571428571429,
+        0.14074813170701916
+      ],
+      "median_diff": 0.027533070070474785,
+      "ci95": [
+        -0.2689904402371094,
+        0.14074813170701916
+      ],
+      "p": 1.0,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 2,
+      "tie": 0,
+      "loss": 2,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "no_sleep",
+      "outcome": "score_at_25",
+      "label": "best normalized score at 25% of budget",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.031995810054765705,
+        -0.2633057757066186,
+        0.07142857142857151,
+        0.26717426860707394
+      ],
+      "median_diff": 0.05171219074166861,
+      "ci95": [
+        -0.2633057757066186,
+        0.26717426860707394
+      ],
+      "p": 0.625,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 3,
+      "tie": 0,
+      "loss": 1,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "evals",
+      "a": "dream",
+      "b": "no_sleep",
+      "outcome": "score_at_matched_evals",
+      "label": "best normalized score at the pair's matched evaluator-call count",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.025291002716193334,
+        -0.2689904402371094,
+        0.0803571428571429,
+        0.3023885642142988
+      ],
+      "median_diff": 0.027533070070474785,
+      "ci95": [
+        -0.2689904402371094,
+        0.3023885642142988
+      ],
+      "p": 0.875,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 2,
+      "tie": 0,
+      "loss": 2,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant",
+      "matched_evaluations": [
+        63,
+        71,
+        63,
+        61
+      ]
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "dream_unvalidated",
+      "outcome": "budget_to_95",
+      "label": "budget fraction to reach 95% of best_known",
+      "better": "lower",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.0,
+        0.0,
+        0.0,
+        0.33820399999999995
+      ],
+      "median_diff": 0.0,
+      "ci95": [
+        0.0,
+        0.33820399999999995
+      ],
+      "p": 1.0,
+      "test": "exact (2^1 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 3,
+      "win": 0,
+      "tie": 3,
+      "loss": 1,
+      "censored_runs": 7,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "dream_unvalidated",
+      "outcome": "final_score",
+      "label": "final best normalized score",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.039913075857273106,
+        -0.20931201852939163,
+        0.017857142857142905,
+        -0.10995947789610871
+      ],
+      "median_diff": -0.07493627687669091,
+      "ci95": [
+        -0.20931201852939163,
+        0.017857142857142905
+      ],
+      "p": 0.25,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 1,
+      "tie": 0,
+      "loss": 3,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream",
+      "b": "dream_unvalidated",
+      "outcome": "score_at_25",
+      "label": "best normalized score at 25% of budget",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.009673358754783479,
+        -0.10159109763475105,
+        -0.008928571428571397,
+        -0.21991895579221732
+      ],
+      "median_diff": -0.05525983453166122,
+      "ci95": [
+        -0.21991895579221732,
+        0.009673358754783479
+      ],
+      "p": 0.375,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 1,
+      "tie": 0,
+      "loss": 3,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "evals",
+      "a": "dream",
+      "b": "dream_unvalidated",
+      "outcome": "score_at_matched_evals",
+      "label": "best normalized score at the pair's matched evaluator-call count",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.039913075857273106,
+        -0.20931201852939163,
+        0.017857142857142905,
+        -0.10995947789610871
+      ],
+      "median_diff": -0.07493627687669091,
+      "ci95": [
+        -0.20931201852939163,
+        0.017857142857142905
+      ],
+      "p": 0.25,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 1,
+      "tie": 0,
+      "loss": 3,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant",
+      "matched_evaluations": [
+        63,
+        68,
+        67,
+        61
+      ]
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream_unvalidated",
+      "b": "fixed_letta",
+      "outcome": "budget_to_95",
+      "label": "budget fraction to reach 95% of best_known",
+      "better": "lower",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.0,
+        0.86528,
+        0.0,
+        0.37656400000000007
+      ],
+      "median_diff": 0.18828200000000003,
+      "ci95": [
+        0.0,
+        0.86528
+      ],
+      "p": 0.5,
+      "test": "exact (2^2 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 2,
+      "win": 0,
+      "tie": 2,
+      "loss": 2,
+      "censored_runs": 5,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream_unvalidated",
+      "b": "fixed_letta",
+      "outcome": "final_score",
+      "label": "final best normalized score",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.029271504830755357,
+        -0.059805928144140985,
+        0.0625,
+        0.0
+      ],
+      "median_diff": 0.014635752415377679,
+      "ci95": [
+        -0.059805928144140985,
+        0.0625
+      ],
+      "p": 0.75,
+      "test": "exact (2^3 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 1,
+      "win": 2,
+      "tie": 1,
+      "loss": 1,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "dream_unvalidated",
+      "b": "fixed_letta",
+      "outcome": "score_at_25",
+      "label": "best normalized score at 25% of budget",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.015169234151015343,
+        -0.16448094580305184,
+        0.0803571428571429,
+        0.0
+      ],
+      "median_diff": -0.007584617075507671,
+      "ci95": [
+        -0.16448094580305184,
+        0.0803571428571429
+      ],
+      "p": 0.75,
+      "test": "exact (2^3 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 1,
+      "win": 1,
+      "tie": 1,
+      "loss": 2,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "evals",
+      "a": "dream_unvalidated",
+      "b": "fixed_letta",
+      "outcome": "score_at_matched_evals",
+      "label": "best normalized score at the pair's matched evaluator-call count",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.029271504830755357,
+        -0.059805928144140985,
+        0.0625,
+        0.0
+      ],
+      "median_diff": 0.014635752415377679,
+      "ci95": [
+        -0.059805928144140985,
+        0.0625
+      ],
+      "p": 0.75,
+      "test": "exact (2^3 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 1,
+      "win": 2,
+      "tie": 1,
+      "loss": 1,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant",
+      "matched_evaluations": [
+        69,
+        68,
+        67,
+        70
+      ]
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "summarize",
+      "b": "no_sleep",
+      "outcome": "budget_to_95",
+      "label": "budget fraction to reach 95% of best_known",
+      "better": "lower",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        0.0,
+        -0.052372000000000016,
+        0.0,
+        -0.971956
+      ],
+      "median_diff": -0.026186000000000008,
+      "ci95": [
+        -0.971956,
+        0.0
+      ],
+      "p": 0.5,
+      "test": "exact (2^2 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 2,
+      "win": 2,
+      "tie": 2,
+      "loss": 0,
+      "censored_runs": 5,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "summarize",
+      "b": "no_sleep",
+      "outcome": "final_score",
+      "label": "final best normalized score",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.1052429705097655,
+        -0.015963099889604537,
+        0.0714285714285714,
+        0.2507076096031279
+      ],
+      "median_diff": 0.02773273576948343,
+      "ci95": [
+        -0.1052429705097655,
+        0.2507076096031279
+      ],
+      "p": 0.875,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 2,
+      "tie": 0,
+      "loss": 2,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "tokens",
+      "a": "summarize",
+      "b": "no_sleep",
+      "outcome": "score_at_25",
+      "label": "best normalized score at 25% of budget",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.04493152280124446,
+        -0.015095676343641173,
+        0.07142857142857151,
+        0.5970527022954
+      ],
+      "median_diff": 0.028166447542465167,
+      "ci95": [
+        -0.04493152280124446,
+        0.5970527022954
+      ],
+      "p": 0.625,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 2,
+      "tie": 0,
+      "loss": 2,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant"
+    },
+    {
+      "question": "Q3",
+      "matching": "evals",
+      "a": "summarize",
+      "b": "no_sleep",
+      "outcome": "score_at_matched_evals",
+      "label": "best normalized score at the pair's matched evaluator-call count",
+      "better": "higher",
+      "n_pairs": 4,
+      "pairs": [
+        [
+          36,
+          0
+        ],
+        [
+          50,
+          0
+        ],
+        [
+          59,
+          0
+        ],
+        [
+          7,
+          0
+        ]
+      ],
+      "diffs": [
+        -0.08484490485644525,
+        -0.015963099889604537,
+        0.0714285714285714,
+        0.41234804211040754
+      ],
+      "median_diff": 0.02773273576948343,
+      "ci95": [
+        -0.08484490485644525,
+        0.41234804211040754
+      ],
+      "p": 0.875,
+      "test": "exact (2^4 sign assignments, tie-averaged ranks, zeros dropped)",
+      "n_zero": 0,
+      "win": 2,
+      "tie": 0,
+      "loss": 2,
+      "censored_runs": 0,
+      "significant": false,
+      "verdict": "not significant",
+      "matched_evaluations": [
+        44,
+        39,
+        38,
+        43
+      ]
+    }
+  ],
+  "summary": "Q1 (does sleep help?): no significant difference from no_sleep. fixed_letta vs no_sleep: median paired difference in final best normalized score +0.000 (95% CI -0.015 to +0.251), Wilcoxon p=0.75 (NOT significant), W/T/L 2/1/1 over 4 pairs. Q1 at an equal evaluator-call count (replays included): fixed_letta vs no_sleep: median paired difference in best normalized score at the pair's matched evaluator-call count +0.000 (95% CI -0.015 to +0.251), Wilcoxon p=0.75 (NOT significant), W/T/L 2/1/1 over 4 pairs. Q2 (does fatigue timing beat fixed schedules?): not testable (arms missing). Primary outcome: final best normalized score; significance at alpha=0.05, two-sided. With only 4 pairs no exact Wilcoxon test can reach p<0.05 (minimum p = 2/2^n), so every result here is not significant by construction; run more seeds.",
+  "interpretation": [
+    "Underpowered: 4 pair(s) per contrast; no '~' or '>' pattern of the guide can be assessed (need >= 6 pairs for p < 0.05 to be attainable)."
+  ],
+  "interpretation_guide": "Interpretation guide\n  - fatigue > fixed_matched                      -> timing matters, beyond the amount of sleep\n  - fatigue ~ fixed_matched, both > fixed_letta  -> the gain comes from sleeping less often, not from smart timing\n  - fixed_matched ~ random_matched               -> fixed schedules carry no timing benefit\n  - any sleep arm < no_sleep                     -> consolidation costs more budget than it returns at this run length\n  - dream > fixed_letta                          -> REM dreaming + A/B validation beats NREM-only (the central claim)\n  - dream ~ dream_unvalidated                    -> the hypotheses help even untested; validation is not load-bearing\n  - dream < dream_unvalidated                    -> validation evals cost more budget than confirmed discoveries return\n  ('>' / '<' = significant paired difference at alpha; '~' = not significant)"
+}

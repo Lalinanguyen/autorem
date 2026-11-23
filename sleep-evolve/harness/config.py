@@ -77,6 +77,10 @@ class RunConfig(BaseModel):
     awake_tags: bool | None = Field(
         None, description="ask the agent for the APPROACH_TAGS/... header; None = the policy decides (default off)"
     )
+    edit_mode: Literal["full", "diff", "auto"] = Field(
+        "full", description="agent edit format (harness/edits.py): full = complete program in a code block "
+                            "(the original behavior); diff = SEARCH/REPLACE blocks against the parent only; "
+                            "auto = either. Part of the agent: identical in every arm (drift check)")
     sleep_policy: str = "no_sleep"
     sleep_policies: dict[str, dict[str, Any]] = Field(
         default_factory=dict, description="per-policy params; the selected policy's entry is used"
@@ -93,6 +97,12 @@ class RunConfig(BaseModel):
     model: str | None = Field(
         None,
         description="Expected model name. The harness calls LLM_MODEL; a mismatch is logged as a warning.",
+    )
+    sleep_model: str | None = Field(
+        None,
+        description="Model for sleep-phase LLM calls (consolidation, schemas, dreamer); null = the "
+                    "agent model. Sleep calls still charge the same Budget under role 'sleep'. "
+                    "LLM_SLEEP_MODEL env wins over this field; applies to every sleeping arm.",
     )
     serve: ServeConfig = Field(default_factory=ServeConfig)
     llm: LLMSettings = Field(default_factory=LLMSettings)

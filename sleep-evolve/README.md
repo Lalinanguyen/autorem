@@ -8,8 +8,9 @@ An agent proposes programs, an evaluator scores them, and every step is logged. 
 in place of the raw history. Sleep policies are compared at a **matched total token budget**: sleep
 tokens and agent tokens draw from the same `Budget`.
 
-This is a scaffold: one real path end to end (problem 36 + `no_sleep`/`summarize`), with mocks for
-everything else.
+Real evaluators exist for problems 7 (difference bases), 36 (circle packing), 50 (max/min distance
+ratio) and 59 (no-isosceles grid subsets); each reproduces its published AlphaEvolve construction
+(see `verify_problem`). Everything else is mocked.
 
 ## Setup
 
@@ -42,6 +43,9 @@ Each run writes `runs/<run_id>/history.jsonl`, `summary.json` and `best_program.
 | `evaluators/base.py` | `EvalResult`, `Evaluator` protocol, subprocess sandbox (`run_program`), `normalized_score` |
 | `evaluators/mock.py` | problem 0: cheap quadratic for tests |
 | `evaluators/p36_circle_packing.py` | problem 36: 26 circles in the unit square, max sum of radii |
+| `evaluators/p7_difference_bases.py` | problem 7: integer set B covering differences 1..n, min \|B\|²/n |
+| `evaluators/p50_max_min_ratio.py` | problem 50: 16 planar points, min (max/min pairwise distance)² |
+| `evaluators/p59_no_isosceles.py` | problem 59: largest isosceles-free subset of the 64x64 grid |
 | `llm/client.py` | `LLMClient.complete(messages, *, role, max_tokens)`: the only path to the API |
 | `llm/mock.py` | deterministic mock transport with fixed usage |
 | `harness/budget.py` | `Budget`: one total for agent + sleep, raises `BudgetExhausted` |
@@ -86,6 +90,47 @@ Each run writes `runs/<run_id>/history.jsonl`, `summary.json` and `best_program.
 
 - **Model name.** The harness calls `LLM_MODEL`. The config's `model` is recorded in the summary,
   with a warning if it differs. `serve.model` is what `infra/modal_vllm.py` deploys.
+
+## Edit formats (`edit_mode`)
+
+The agent replies with a full rewrite (a ```python block) or SEARCH/REPLACE diffs against the
+parent (`harness/edits.py`, aider/OpenEvolve format):
+
+```
+<<<<<<< SEARCH
+(lines copied exactly from the parent)
+=======
+(replacement lines)
+>>>>>>> REPLACE
+```
+
+Every block must match the parent exactly once (exact whole-line match first, then a
+trailing-whitespace-only fallback). `full` (default, and what the `*_openai.yaml` configs use:
+gpt-5-nano failed 33-40% of its diffs) is the original behavior; `diff` accepts diffs only;
+`auto` makes diffs the default and allows a full rewrite only with a `FULL_REWRITE_REASON:` line,
+which is logged and counted.
+
+**SEARCH copy fidelity.** Whenever a reply contains SEARCH blocks, `search_copy_fidelity` measures
+how faithfully each one was copied from the parent: `exact`, `whitespace` (identical once lines
+are stripped), `near` (not found, but best window similarity >= 0.9), or `miss`, plus a mean
+`search_copy_score` (1.0 = exact copy). It is a measure only and never changes whether a diff
+applies. Per step: `search_blocks`, `search_blocks_exact`, `search_blocks_near`,
+`search_copy_score`; per run: `summary.metrics.edits.search_*`. Use it to judge whether a model is
+capable of diffs before switching a config to `auto`. A failed diff
+is an invalid step (`diff_error`, counted as fatigue sloppiness), never a crash — except that in
+`auto` mode a fenced full program in the same reply is used instead (kind `full`, `diff_error`
+records the failed diff, `metrics.edits.diff_salvaged` counts it). If the parent had to be
+truncated to fit the context cap, that step is full-rewrite only: a diff is rejected but a fenced
+program in the same reply is still used. The logged `program` is always the full resulting
+program. `edit_mode` is part of the agent, so the drift check forces it to be identical in every
+arm (GEPA arms use gepa's own proposer and ignore it).
+
+Sleep is diff-first too: replays and dream tests use control `{"base": "<program id>"}` plus
+treatment `{"diff": ...}` (`sleep/program_ref.py`), so a treatment differs from its control by
+exactly the claimed change; full programs are a fallback with a reason. Sleep prompts show a
+capped set of exact base programs (`base_programs`, `base_program_chars`) and reference everything
+else by id. Per-step fields: `edit_mode`, `edit_kind`, `diff_blocks`, `diff_lines_changed`,
+`diff_error`, `parent_truncated`, `full_rewrite_reason`; per-run totals in `summary.metrics.edits`.
 
 ## REM dreaming and parametric learning
 

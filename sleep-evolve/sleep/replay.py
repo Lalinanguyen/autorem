@@ -27,6 +27,15 @@ Evaluation order: control first; if the control is unusable (crash / invalid / n
 treatment is NOT run (no baseline, so it could not decide anything). A replay therefore costs
 0, 1 or 2 evaluator calls; `evaluations` in each record and ReplayReport.evaluations count them.
 
+Diff-first shapes (sleep/program_ref.py): the preferred replay is a REFERENCE control
+({"base": "<program id>"}, resolved exactly from the history) plus a SEARCH/REPLACE treatment
+({"diff": ...}, harness/edits.py) applied to it, which enforces "differs only by the claimed change"
+structurally. Full programs ({"program": ..., "reason": ...} or the original bare strings) are the
+fallback and keep working. An unresolvable base or a diff that does not apply wastes the replay with
+the reason (no evaluator call); the per-replay record carries the edit kinds, base id, diff stats,
+apply error, full-rewrite reasons and the sha of each evaluated program (program_ref.pair_record).
+The paired decision rule below is unchanged.
+
 Code-level checks of "differs only by the claimed change" (the prompt defines the rest): both
 programs must be strings defining `def construct(`; control and treatment with the same AST
 (only comments/whitespace differ) are wasted without running. The line diff is recorded
@@ -56,6 +65,7 @@ from dataclasses import dataclass, field
 from sleep.consolidator_io import diff_summary
 from harness.evals import EvalExhausted
 from sleep.memory import Edit, MemoryStore
+from sleep.program_ref import ProgramIndex, pair_record, resolve_pair
 
 DEFAULT_MARGIN = 1e-3  # relative to |control score|; a guess, see module docstring
 CRASH_MARKERS = ("timeout", "exit code", "program produced no result", "result is not valid json",
@@ -169,8 +179,13 @@ def _evaluate(evaluator, program: str) -> dict:
 
 def run_replays(replays: list[dict], claims: dict[str, dict], store: MemoryStore, evaluator, *,
                 step: int, max_replays: int, margin: float = DEFAULT_MARGIN, rel_tol: float = 1e-6,
-                run_best: float | None = None, program_chars: int = 400) -> ReplayReport:
-    """Run up to `max_replays` paired replays; each applies exactly one Edit to `store` or counts as wasted."""
+                run_best: float | None = None, program_chars: int = 4000,
+                index: ProgramIndex | None = None) -> ReplayReport:
+    """Run up to `max_replays` paired replays; each applies exactly one Edit to `store` or counts as wasted.
+
+    `index` (sleep/program_ref.py ProgramIndex over the run history) resolves ref controls
+    ({"base": id}); diff treatments ({"diff": ...}) are applied to the resolved control. A ref / diff
+    that does not resolve wastes the replay with the reason (no evaluator call)."""
     rep = ReplayReport()
     for i, r in enumerate(replays[: max(0, max_replays)]):
         rid = f"r{step}.{i}"
@@ -179,23 +194,28 @@ def run_replays(replays: list[dict], claims: dict[str, dict], store: MemoryStore
         rep.records.append(rec)
         claim = claims.get(r.get("cid"))
         control, treatment = r.get("control"), r.get("treatment")
+        res = None
         if claim is None:
             rec["wasted"] = "no matching claim"
         elif control is None and treatment is None and "program" in r:
             rec["wasted"] = "single-program replay (old schema): no control to compare against"
-        elif not is_program(control):
-            rec["wasted"] = "unparseable control program"
-        elif not is_program(treatment):
-            rec["wasted"] = "unparseable treatment program"
-        elif same_program(control, treatment):
-            rec["wasted"] = "control and treatment are identical"
-        elif evaluator is None:
-            rec["wasted"] = "no evaluator bound"
+        else:
+            res = resolve_pair(control, treatment, index)
+            rec.update(pair_record(res, full_chars=program_chars))
+            control, treatment = res.control, res.treatment
+            if res.error:
+                rec["wasted"] = res.error
+            elif not is_program(control):
+                rec["wasted"] = "unparseable control program"
+            elif not is_program(treatment):
+                rec["wasted"] = "unparseable treatment program"
+            elif same_program(control, treatment):
+                rec["wasted"] = "control and treatment are identical"
+            elif evaluator is None:
+                rec["wasted"] = "no evaluator bound"
         if "wasted" in rec:
             rep.wasted += 1
             continue
-        rec["control_program"] = control[:program_chars]
-        rec["treatment_program"] = treatment[:program_chars]
         rec["program_diff"] = diff_summary(control, treatment)
         c_out = _evaluate(evaluator, control)
         t_out = _evaluate(evaluator, treatment) if _usable(c_out) else None

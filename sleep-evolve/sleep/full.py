@@ -10,7 +10,12 @@ One sleep (`consolidate`):
   4. paired replay (sleep/replay.py): each replay runs a control and a treatment program via
      evaluator.evaluate and decides exactly one Edit from treatment - control (`replay_margin`,
      relative), or is counted in replays_wasted; evaluator calls are counted in
-     `replay_evaluations` (details)
+     `replay_evaluations` (details). Diff-first (sleep/program_ref.py): the consolidator sees up to
+     `base_programs` programs in full (run best first, `base_program_chars` total, never truncated)
+     and writes a ref control {"base": id} + a SEARCH/REPLACE treatment {"diff": ...}; full programs
+     are the fallback. Details carry per-replay edit kinds / base / diff stats / apply errors and the
+     per-sleep counts replay_control_ref, replay_control_full, replay_treatment_diff,
+     replay_treatment_full, replay_diff_failures, replay_base_missing (dream_* likewise for step 8)
   5. claims without a decided replay become tentative edits per `relation`
   6. merges of near-duplicate items (MemoryStore.merge), then goals: up to `max_goals` one-sentence
      goals (g1, g2, ...) after g0, each replacing a stale goal or added (oldest pushed out)
@@ -67,6 +72,7 @@ from typing import Any
 
 from harness.context import count_tokens, fit_lines
 from harness.fatigue import FatigueReading, SleepDepth
+from harness.metrics import SLEEP_EDIT_KEYS
 from sleep import pressure as P
 from sleep.consolidator_io import (
     CONSOLIDATOR_SYSTEM, CONSOLIDATOR_USER, NREM_NOTE, REM_NOTE, RETRY_NOTE, parse_json_object, step_view,
@@ -75,6 +81,7 @@ from sleep.consolidator_io import (
 from sleep.dreamer import Dreamer
 from sleep.insight_validator import validate_dreams as run_dream_tests
 from sleep.memory import Edit, MemoryStore
+from sleep.program_ref import ProgramIndex, base_programs, kind_counts, render_bases
 from sleep.replay import run_replays
 from sleep.scheduler import choose_mode
 from sleep.schema import SchemaStore
@@ -103,12 +110,20 @@ DEFAULTS: dict[str, Any] = {
     # paired replay (each replay = up to 2 evaluator calls: control + treatment)
     "replay": True, "replay_budget": 2, "rem_replay_budget": 1, "replay_rel_tol": 1e-6,
     "replay_margin": 1e-3,         # rule/fact/skill confirmed iff treatment - control > margin * |control|
+    # diff-first sleep programs (sleep/program_ref.py): programs shown IN FULL to the consolidator /
+    # dreamer so replays and dream tests can be a ref control + a SEARCH/REPLACE treatment; every
+    # other program is referenced by id only. Never truncated: a base that does not fit is skipped.
+    "base_programs": 4,            # max programs shown in full per sleep call (run best first)
+    "base_program_chars": 12000,   # total chars of those programs (~4000 counter tokens)
+    "dream_max_steps": 12,         # recent steps (compact views, no program text) shown to the dreamer
     # goals (consolidator-written, after the best-score line g0; never decayed or evicted)
     "max_goals": 3,
     "merges": True,                # apply the consolidator's merges of near-duplicate items
     # schema store (REM only)
     "schema": False, "schema_min_strength": 0.6, "schema_min_items": 3, "max_schemas": 4,
-    "schema_max_tokens": 2048, "schema_path": None, "schema_persist": False,
+    # schema_max_tokens None = consolidator_max_tokens: reasoning models (gpt-5*) count reasoning
+    # tokens against the cap, so a small fixed cap can return an empty reply
+    "schema_max_tokens": None, "schema_path": None, "schema_persist": False,
     # REM dreaming (sleep/dreamer.py + sleep/insight_validator.py), REM mode only: the dreamer
     # recombines memory items + steps into hypotheses; each stays a hypothesis until a paired
     # A/B sandbox test confirms it (validated -> verified, refuted -> refuted, else tentative).
@@ -147,7 +162,7 @@ TIMED_DEPTHS = ("scheduler", "nrem", "fatigue")
 SUM_METRICS = ("items_added", "items_evicted", "replays_wasted", "replays_run", "claims", "edits_applied",
                "edits_rejected", "replay_evaluations", "replays_beat_run_best", "consolidator_calls",
                "dream_calls", "dream_evaluations", "dreams_validated", "dreams_refuted",
-               "dreams_uncertain", "dreams_untested")
+               "dreams_uncertain", "dreams_untested", *SLEEP_EDIT_KEYS)
 
 METRIC_FIELDS = ("pressure", "sleep_mode", "block_tokens", "items_added", "items_evicted", "replays_wasted")
 
@@ -186,7 +201,8 @@ class FullSleep:
         )
         self.schemas = SchemaStore(
             min_strength=self.p["schema_min_strength"], min_items=self.p["schema_min_items"],
-            max_schemas=self.p["max_schemas"], max_tokens=self.p["schema_max_tokens"],
+            max_schemas=self.p["max_schemas"],
+            max_tokens=self.p["schema_max_tokens"] or self.p["consolidator_max_tokens"],
             max_chars=self.p["max_item_chars"], path=self.p["schema_path"], persist=self.p["schema_persist"],
         ) if self.p["schema"] else None
         self.evaluator = None
@@ -194,7 +210,7 @@ class FullSleep:
         self.dreamer = Dreamer(k_sources=p["dream_k_sources"], max_dreams=p["dream_max"],
                                dream_max_tokens=p["dream_max_tokens"], retries=p["dream_retries"],
                                seed=p["dream_seed"] or 0, min_strength=p["dream_min_strength"],
-                               k_failures=p["dream_k_failures"])
+                               k_failures=p["dream_k_failures"], max_steps=p["dream_max_steps"])
         if p["memory_path"]:
             try:
                 self.store = MemoryStore.from_state(
@@ -441,10 +457,14 @@ class FullSleep:
         replays: list[dict] = []
         goals: list[dict] = []
         merges: list[dict] = []
+        index = ProgramIndex.from_records(history)  # exact program text by id / step, for refs and diffs
+        bases: list[dict] = []
         if window:
+            bases = self._bases(records, window)
+            m["base_programs_shown"] = [b["program_id"] for b in bases]
             user = CONSOLIDATOR_USER.substitute(
                 task=task, n_items=len(self.store), memory_items_json=json.dumps(self.store.to_json_list(), indent=0),
-                last_sleep_step=max(0, since), step=step,
+                programs=render_bases(bases), last_sleep_step=max(0, since), step=step,
                 steps_jsonl="\n".join(json.dumps(step_view(h, programs), default=str) for h in window),
                 stall=f"{comp['stall']:.2f}", persev=f"{comp['perseveration']:.2f}", surprise=f"{comp['surprise']:.2f}",
                 mode_note=REM_NOTE if mode == "rem" else NREM_NOTE, k_steps=k_steps,
@@ -477,10 +497,12 @@ class FullSleep:
         n_rejected = 0
         if p["replay"] and replays:
             rep = run_replays(replays, by_cid, self.store, self.evaluator, step=step, max_replays=replay_budget,
-                              margin=p["replay_margin"], rel_tol=p["replay_rel_tol"], run_best=run_best)
+                              margin=p["replay_margin"], rel_tol=p["replay_rel_tol"], run_best=run_best,
+                              index=index)
             decided, applied = rep.decided_cids, list(rep.edits_applied)
             m.update(replays=rep.records, replays_run=len(rep.records), replays_wasted=rep.wasted,
                      replay_evaluations=rep.evaluations, replays_beat_run_best=rep.beats_run_best)
+        m.update(kind_counts(m["replays"], "replay"))
 
         tentative = self._tentative_edits([c for c in claims if c["cid"] not in decided])
         ok, rejected = self.store.apply_edits(tentative, step)
@@ -516,7 +538,7 @@ class FullSleep:
         if self.schemas is not None and mode == "rem":
             m.update(self.schemas.update(task, self.store, llm, step=step))
         if p["dream"] and mode == "rem":
-            m.update(self._dream(task, records, llm, budget, step=step))
+            m.update(self._dream(task, records, llm, budget, step=step, index=index))
 
         self._persist_memory()
         self._last_sleep_step = step
@@ -528,22 +550,44 @@ class FullSleep:
         self.last_metrics = m
         return m
 
-    def _dream(self, task: str, records: list[dict], llm, budget, *, step: int) -> dict:
+    def _bases(self, records: list[dict], window: list[dict]) -> list[dict]:
+        """Programs shown in full to a sleep call (program_ref.base_programs): the run best, then the
+        window's steps with the largest |delta_vs_best| / surprise, then the latest valid steps;
+        capped by `base_programs` (count) and `base_program_chars` (total chars, never truncated)."""
+        def salience(h: dict) -> float:
+            d, s = h.get("delta_vs_best"), h.get("surprise")
+            return max(abs(d) if isinstance(d, (int, float)) else 0.0, s if isinstance(s, (int, float)) else 0.0)
+        prefer = sorted((h for h in window if h.get("valid")), key=salience, reverse=True)
+        return base_programs(records, prefer=prefer, k=self.p["base_programs"], max_chars=self.p["base_program_chars"])
+
+    def _dream(self, task: str, records: list[dict], llm, budget, *, step: int,
+               index: ProgramIndex | None = None) -> dict:
         """The REM dream pass: recombine memory into hypotheses, then validate them in the sandbox.
 
         Budget-aware (adaptive sleeping): below `dream_min_budget_tokens` remaining the pass is
         skipped entirely; `dream_evals` caps sandbox tests so dreams can never eat the run's
         evaluation budget unchecked (they share the run's EvalBudget through the bound evaluator).
+
+        Bounded prompt: the dreamer sees the last `dream_max_steps` steps as compact step views
+        (consolidator_io.step_view, no program text) plus the same capped base programs as the
+        consolidator. (It used to receive every raw step record of the run, programs and details
+        included, which made the dream prompt grow without bound with run length.)
         """
         p = self.p
         remaining = getattr(budget, "remaining", None)
         if remaining is not None and remaining < p["dream_min_budget_tokens"]:
             return {"dream_skipped": "low_budget", "dream_remaining_tokens": remaining,
                     "dream_calls": 0, "dream_evaluations": 0}
-        dm = self.dreamer.dream(task, self.store, records, llm, step=step)
+        index = index or ProgramIndex.from_records(records)
+        recent = records[-p["dream_max_steps"]:] if p["dream_max_steps"] else []
+        views = [step_view(h, index.programs) for h in recent]
+        bases = self._bases(records, recent)
+        dm = self.dreamer.dream(task, self.store, views, llm, step=step, bases=bases)
         m: dict = {"dream_calls": dm.get("dream_calls", 0),
                    "dream_parse_error": dm.get("dream_parse_error"),
-                   "dream_source_ids": dm.get("dream_source_ids"), "dream_evaluations": 0}
+                   "dream_source_ids": dm.get("dream_source_ids"), "dream_evaluations": 0,
+                   "dream_prompt_tokens": dm.get("dream_prompt_tokens"),
+                   "dream_base_programs_shown": [b["program_id"] for b in bases]}
         dreams = dm.get("dreams") or []
         if not dreams:
             m["dreams"] = []
@@ -552,7 +596,8 @@ class FullSleep:
         rep = run_dream_tests(dreams, self.store, self.evaluator, step=step,
                               max_tests=p["dream_evals"] if p["dream_validate"] else 0,
                               margin=p["dream_margin"] if p["dream_margin"] is not None else p["replay_margin"],
-                              rel_tol=p["replay_rel_tol"])
+                              rel_tol=p["replay_rel_tol"], index=index)
+        m.update(kind_counts(rep["records"], "dream"))
         m["dreams"] = rep["records"]
         m["dream_evaluations"] = rep["evaluations"]
         for k in ("validated", "refuted", "uncertain", "untested"):

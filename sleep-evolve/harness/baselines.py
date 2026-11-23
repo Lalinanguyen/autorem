@@ -31,6 +31,14 @@ Arms 2-5 run NREM only (timed_depth=nrem: no REM, no forget tier, scheduler not 
   dream_distill   `dream` plus an optional memory_path: the store persists across runs/problems so
                   validated discoveries accumulate for the offline distillation pipeline (arm 6;
                   actual LoRA training happens outside runs via sleep/trainer.py + infra/modal_train.py)
+  no_sleep_extra_evals  NoSleep + extra_eval_schedule (variant, not in the default list): the eval-matched
+                  Q1 control. Wave 2: for every sleep line of the fatigue run on the same (problem, seed) it
+                  spends as many extra evaluator calls as that sleep did (replays + dream tests: the
+                  increase of the line's cumulative `sleep_evaluations`, else details replay_evaluations +
+                  dream_evaluations), after the same step, each on a small float-literal perturbation of
+                  that step's parent (harness/perturb.py). Improving perturbations enter the ProgramDB, so
+                  the control can actually use its extra evaluations (a judgment call: the strongest
+                  control). Reads the source log like fixed_matched does.
 
 "Sleep count" for matching = LLM sleeps (depth nrem or nrem_rem) in the fatigue arm's log; its
 code-only forgets are not counted (they are reported separately in the metrics).
@@ -44,7 +52,9 @@ policy, `awake_tags` not true, or an effective context cap (min of context_cap_t
 policy's own cap) that differs between arms. The LLM identity is also asserted explicitly: the config
 `model`, the `llm:` block, the resolved request parameters (llm/chat_params.py: token param,
 reasoning_effort, temperature, under the shared env), `prices` and `max_dollars` must be identical
-in every arm, so agent and sleep calls of every arm get the same model and settings. Per-arm `overrides` / undeclared `arm_params` in the
+in every arm, so agent and sleep calls of every arm get the same model and settings. The agent's edit format
+(`edit_mode`: full / diff / auto, harness/edits.py) is an ordinary RunConfig field, so it is compared
+like any other and must be identical in every arm: it belongs to the agent, not the sleep policy. Per-arm `overrides` / undeclared `arm_params` in the
 suite YAML therefore fail the check.
 
 Run order (plan_suite): wave 1 = fatigue (auto-added when a matched arm needs it) and every
@@ -72,7 +82,7 @@ from harness.metrics import llm_sleep_steps, step_records
 SHARED_POLICY = "full_sleep"  # the sleep_policies entry holding the shared sleep settings
 PAIR_KEYS = ("problem_id", "seed")
 VIEW_SKIP = ("run_id", "baseline_arm", "sleep_policy", "sleep_policies", "out_dir")
-MATCHED_KINDS = ("even", "random")
+MATCHED_KINDS = ("even", "random", "evals")
 
 
 class ConfigDriftError(ValueError):
@@ -85,7 +95,7 @@ class ArmSpec:
     policy: str                                   # no_sleep | full_sleep | sleep_lite
     params: dict = field(default_factory=dict)    # default values of the declared params
     declared: frozenset = frozenset()             # policy params this arm may set
-    matched: str | None = None                    # "even" | "random": schedule from the fatigue arm
+    matched: str | None = None                    # "even" | "random" | "evals": schedule from the fatigue arm
     role: str = ""
 
 
@@ -96,6 +106,9 @@ def _spec(name, policy, params=None, matched=None, role="", extra=()):
 
 ARM_SPECS: dict[str, ArmSpec] = {s.name: s for s in (
     _spec("no_sleep", "no_sleep", role="Q1 control: no memory, no consolidation"),
+    _spec("no_sleep_extra_evals", "no_sleep", {"extra_eval_schedule": []}, matched="evals",
+          extra=("extra_eval_sigma",),
+          role="Q1 eval-matched control: no_sleep + the fatigue run's sleep evaluations as parent perturbations"),
     _spec("fixed_letta", "full_sleep", {"gating": "fixed", "every_n": 5, "timed_depth": "nrem"},
           role="Letta-style NREM every 5 steps"),
     _spec("fixed_sparse", "full_sleep", {"gating": "fixed", "every_n": 20, "timed_depth": "nrem"},
@@ -198,7 +211,7 @@ def arm_params(suite: Suite, arm: str) -> dict:
 
 
 def resolve_arm(suite: Suite, arm: str, problem_id: int, seed: int, *, sleep_steps: list[int] | None = None,
-                out_dir: str | None = None) -> RunConfig:
+                extra_eval_schedule: list | None = None, out_dir: str | None = None) -> RunConfig:
     """The fully resolved RunConfig of `arm` on (problem_id, seed)."""
     spec = ARM_SPECS[arm]
     shared = suite.shared_sleep
@@ -206,9 +219,13 @@ def resolve_arm(suite: Suite, arm: str, problem_id: int, seed: int, *, sleep_ste
     params = arm_params(suite, arm)
     if sleep_steps is not None:
         params["sleep_steps"] = sorted(int(s) for s in sleep_steps)
+    if extra_eval_schedule is not None:
+        params["extra_eval_schedule"] = sorted([int(s), int(k)] for s, k in extra_eval_schedule)
     policies: dict[str, dict] = {SHARED_POLICY: copy.deepcopy(shared)}
     if spec.policy != "no_sleep":
         policies[spec.policy] = {**copy.deepcopy(shared), **params}
+    elif params:  # no_sleep variants get only their declared params (NoSleep ignores the shared settings)
+        policies["no_sleep"] = params
     data.update(problem_id=problem_id, seed=seed, sleep_policy=spec.policy, sleep_policies=policies,
                 baseline_arm=arm, run_id=None)
     if out_dir is not None:
@@ -230,7 +247,7 @@ def _flatten(obj: Any, prefix: str = "") -> dict[str, Any]:
 def effective_policy_params(cfg: RunConfig) -> dict:
     """What the selected policy receives; for no_sleep the shared settings it carries unused."""
     if cfg.sleep_policy == "no_sleep":
-        return dict(cfg.sleep_policies.get(SHARED_POLICY, {}))
+        return {**cfg.sleep_policies.get(SHARED_POLICY, {}), **cfg.sleep_policies.get("no_sleep", {})}
     return cfg.policy_params
 
 
@@ -264,8 +281,9 @@ def llm_identity(cfg: RunConfig) -> dict:
         params = resolve_chat_params(cfg.model, cfg.llm, warn=False).to_dict()
     except ValueError as e:
         params = {"error": str(e)}
-    return {"model": cfg.model, "llm": cfg.llm.model_dump(), "resolved": params,
-            "prices": {k: v.model_dump() for k, v in sorted(cfg.prices.items())}, "max_dollars": cfg.max_dollars}
+    return {"model": cfg.model, "sleep_model": cfg.sleep_model, "llm": cfg.llm.model_dump(),
+            "resolved": params, "prices": {k: v.model_dump() for k, v in sorted(cfg.prices.items())},
+            "max_dollars": cfg.max_dollars}
 
 
 def drift_problems(suite: Suite, cfgs: Iterable[RunConfig]) -> list[str]:
@@ -353,18 +371,48 @@ def random_seed_for(suite: Suite, problem_id: int, seed: int) -> str:
     return f"{suite.section.matching.seed_salt}|p{problem_id}|s{seed}"
 
 
+def sleep_eval_schedule(history: list[dict]) -> list[list[int]]:
+    """[[step, k], ...]: evaluator calls each sleep line of a run spent (replays + dream tests).
+
+    k = the line's cumulative `sleep_evaluations` minus the previous line's; for logs without the
+    field, details replay_evaluations + dream_evaluations. Sleeps that spent nothing are omitted."""
+    out: list[list[int]] = []
+    prev = 0
+    for h in history:
+        cur = h.get("sleep_evaluations")
+        if h.get("event") == "sleep":
+            if isinstance(cur, int):
+                k = cur - prev
+            else:
+                d = h.get("details") or {}
+                k = int(d.get("replay_evaluations") or 0) + int(d.get("dream_evaluations") or 0)
+            if k > 0:
+                out.append([int(h.get("step") or 0), int(k)])
+        if isinstance(cur, int):
+            prev = cur
+    return out
+
+
 def matched_source(history: list[dict]) -> dict:
-    """LLM-sleep count and length of a source (fatigue) run log."""
+    """LLM-sleep count, length and per-sleep evaluator calls of a source (fatigue) run log."""
     steps = step_records(history)
     sleeps = llm_sleep_steps(history)
     return {"n_sleeps": len(sleeps), "sleep_steps": sleeps,
-            "length": max((int(h.get("step") or 0) for h in steps), default=0)}
+            "length": max((int(h.get("step") or 0) for h in steps), default=0),
+            "eval_schedule": sleep_eval_schedule(history)}
 
 
-def schedule_for(suite: Suite, arm: str, problem_id: int, seed: int, source: dict) -> tuple[list[int], dict]:
+def schedule_for(suite: Suite, arm: str, problem_id: int, seed: int, source: dict) -> tuple[list, dict]:
+    """Matched schedule of `arm` from the source log: sleep steps ("even" / "random") or, for the
+    "evals" kind, the [[step, k], ...] extra-evaluation schedule."""
     spec = ARM_SPECS[arm]
     n, length = source["n_sleeps"], source["length"]
     g = suite.min_gap()
+    if spec.matched == "evals":
+        sched = [list(x) for x in source.get("eval_schedule") or []]
+        info = {"kind": "evals", "source_arm": SOURCE_ARM, "source_sleep_evaluations": sum(k for _, k in sched),
+                "source_length": length, "scheduled_extra_evals": sched}
+        return sched, info
     if spec.matched == "even":
         steps = even_schedule(n, length, g)
         rng_seed = None
@@ -441,7 +489,11 @@ def plan_suite(suite: Suite, problems: Iterable[int], seeds: Iterable[int], arms
 def attach_schedule(suite: Suite, job: Job, history: list[dict]) -> tuple[RunConfig, dict]:
     """The matched job's config with sleep_steps from the source log (re-checked for drift)."""
     steps, info = schedule_for(suite, job.arm, job.problem_id, job.seed, matched_source(history))
-    cfg = resolve_arm(suite, job.arm, job.problem_id, job.seed, sleep_steps=steps, out_dir=job.cfg.out_dir)
+    if ARM_SPECS[job.arm].matched == "evals":
+        cfg = resolve_arm(suite, job.arm, job.problem_id, job.seed, extra_eval_schedule=steps,
+                          out_dir=job.cfg.out_dir)
+    else:
+        cfg = resolve_arm(suite, job.arm, job.problem_id, job.seed, sleep_steps=steps, out_dir=job.cfg.out_dir)
     check_drift(suite, [cfg])
     info["source_run_id"] = job.source_run_id
     return cfg, info
@@ -466,5 +518,5 @@ __all__ = [
     "ARM_SPECS", "DEFAULT_ARMS", "ArmSpec", "BaselinesSection", "ConfigDriftError", "Job", "MatchingConfig", "Suite",
     "add_matching_to_summary", "attach_schedule", "check_drift", "config_view", "drift_problems", "effective_context_cap",
     "even_schedule", "is_suite_file", "load_suite", "make_suite", "matched_source", "plan_suite", "random_schedule",
-    "resolve_arm", "schedule_for",
+    "resolve_arm", "schedule_for", "sleep_eval_schedule",
 ]

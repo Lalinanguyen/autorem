@@ -11,6 +11,7 @@ k_recent: 5
 max_completion_tokens: 16384    # includes reasoning tokens on reasoning models
 context_cap_tokens: 8000       # the SAME wake-context cap in every arm (no_sleep fills it with raw steps)
 awake_tags: true               # required in every arm
+edit_mode: full                # full rewrites: gpt-5-nano failed 33-40% of diffs (runs/dream_openai vs _auto, 2026-11); auto|diff still available, same in every arm
 
 sleep_policy: full_sleep       # the base runs as the fatigue arm if used directly with run_one
 sleep_policies:
