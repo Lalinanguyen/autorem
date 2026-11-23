@@ -1,0 +1,803 @@
+{
+  "run_id": "p7_dream_unvalidated_s0",
+  "problem_id": 7,
+  "problem": "p7_difference_basis",
+  "sleep_policy": "full_sleep",
+  "arm": "dream_unvalidated",
+  "seed": 0,
+  "edit_mode": "full",
+  "steps_completed": 61,
+  "stop_reason": "budget_exhausted",
+  "best_program_id": "p42",
+  "best_score": -2.6666666666666665,
+  "best_known": -2.639027469506608,
+  "best_normalized": 0.989635301064978,
+  "best_step": 42,
+  "budget": {
+    "total_tokens": 250000,
+    "used": 252280,
+    "agent_tokens": 196684,
+    "sleep_tokens": 55596,
+    "agent_calls": 62,
+    "sleep_calls": 5,
+    "overshoot": 2280,
+    "discarded_calls": 1
+  },
+  "evaluations": {
+    "used": 70,
+    "limit": null,
+    "remaining": null,
+    "agent_evals": 62,
+    "sleep_evals": 8,
+    "extra_evals": 0,
+    "extra_scheduled": 0
+  },
+  "fatigue": {
+    "enabled": true,
+    "sleeps": {
+      "forget": 14,
+      "nrem": 2,
+      "nrem_rem": 1
+    },
+    "deferrals": 1,
+    "final_level": "tired",
+    "final_fatigue": 0.536845
+  },
+  "llm_model": "gpt-5-nano",
+  "config_model": "gpt-5-nano",
+  "sleep_model": "gpt-5-mini",
+  "wallclock_s": 704.625,
+  "error": null,
+  "config": {
+    "problem_id": 7,
+    "seed": 0,
+    "total_token_budget": 250000,
+    "max_steps": 100000,
+    "k_recent": 5,
+    "max_completion_tokens": 16384,
+    "context_cap_tokens": 8000,
+    "awake_tags": true,
+    "edit_mode": "full",
+    "sleep_policy": "full_sleep",
+    "sleep_policies": {
+      "full_sleep": {
+        "every_n": 10,
+        "consolidator_max_tokens": 8192,
+        "max_block_tokens": 2048,
+        "context_cap_tokens": null,
+        "awake_tags": true,
+        "decay": true,
+        "decay_factor": 0.9,
+        "eviction": true,
+        "min_strength": 0.05,
+        "max_items": 40,
+        "pressure": true,
+        "scheduler": true,
+        "plateau_window": 15,
+        "late_budget_fraction": 0.8,
+        "replay": true,
+        "replay_budget": 2,
+        "rem_replay_budget": 1,
+        "schema": false,
+        "gating": "fatigue",
+        "timed_depth": "nrem",
+        "max_depth": "nrem_rem",
+        "respond_drowsy": true,
+        "min_sleep_budget_tokens": 8192,
+        "wake_recent_steps": 2,
+        "wake_min_strength": 0.1,
+        "dream": true,
+        "dream_max": 3,
+        "dream_k_sources": 6,
+        "dream_max_tokens": 4096,
+        "dream_retries": 1,
+        "dream_seed": null,
+        "dream_min_strength": 0.0,
+        "dream_validate": false,
+        "dream_evals": 2,
+        "dream_margin": null,
+        "dream_min_budget_tokens": 8192,
+        "memory_path": null
+      }
+    },
+    "fatigue": {
+      "enabled": true,
+      "skip_seed_step": true,
+      "round_digits": 6,
+      "load_tokens_scale": 300000,
+      "load_budget_fraction": 0.15,
+      "load_curve": "linear",
+      "load_cap": 1.0,
+      "load_relief": {
+        "forget": 0.2,
+        "nrem": 0.6,
+        "nrem_rem": 0.9
+      },
+      "baseline_steps": 5,
+      "window": 5,
+      "forget_resets_baseline": false,
+      "improvement_min_delta": 0.0,
+      "calibration_floor": 0.01,
+      "calibration_ratio_cap": 4.0,
+      "calibration_invalid_gap": null,
+      "calibration_score_scale": null,
+      "calibration_min_samples": 2,
+      "perseveration_match": 0.5,
+      "perseveration_failure": "no_improvement",
+      "perseveration_lookback": null,
+      "stagnation_steps_norm": 20,
+      "stagnant_threshold": 0.75,
+      "sloppiness_floor": 0.05,
+      "sloppiness_ratio_cap": 4.0,
+      "parse_failure_patterns": [
+        "code block"
+      ],
+      "timeout_patterns": [
+        "timeout",
+        "timed out"
+      ],
+      "header_expected": "auto",
+      "narrowing_tag_weight": 0.5,
+      "narrowing_similarity_weight": 0.5,
+      "narrowing_min_samples": 2,
+      "similarity_token_regex": "\\w+",
+      "context_soft_cap": 8000,
+      "bloat_cap": 1.0,
+      "impairment_weights": {
+        "calibration": 0.35,
+        "perseveration": 0.15,
+        "stagnation": 0.15,
+        "sloppiness": 0.15,
+        "narrowing": 0.1,
+        "bloat": 0.1
+      },
+      "renormalize_missing": true,
+      "load_weight": 0.4,
+      "impairment_weight": 0.6,
+      "drowsy_threshold": 0.3,
+      "tired_threshold": 0.5,
+      "exhausted_threshold": 0.75,
+      "hysteresis_margin": 0.05,
+      "wake_threshold": 0.25,
+      "rearm_max_steps": 20,
+      "grace_steps": 3,
+      "debt_increment": 0.1,
+      "debt_cap": 0.5,
+      "debt_relief": {
+        "forget": 0.0,
+        "nrem": 0.5,
+        "nrem_rem": 1.0
+      },
+      "debt_deepen_threshold": 1e-09,
+      "offline_default_depth": "nrem",
+      "validation": {
+        "horizon_k": 5,
+        "auc_margin": 0.05,
+        "arm": "no_sleep",
+        "min_samples": 10
+      }
+    },
+    "metrics": {
+      "checkpoints": [
+        0.1,
+        0.25,
+        0.5,
+        0.75,
+        1.0
+      ],
+      "thresholds": [
+        0.95,
+        0.99
+      ],
+      "window": 5
+    },
+    "baseline_arm": "dream_unvalidated",
+    "eval_backend": "local",
+    "eval_timeout_s": 60,
+    "model": "gpt-5-nano",
+    "sleep_model": "gpt-5-mini",
+    "serve": {
+      "model": "Qwen/Qwen3-8B",
+      "gpu": "H100:1",
+      "vllm_version": "0.32.0",
+      "max_model_len": 32768
+    },
+    "llm": {
+      "token_param": "auto",
+      "reasoning_effort": "low",
+      "temperature": null,
+      "reasoning_model": null,
+      "thinking": null
+    },
+    "prices": {
+      "gpt-5-nano": {
+        "input": 0.05,
+        "cached_input": 0.005,
+        "output": 0.4,
+        "source": "https://developers.openai.com/api/docs/pricing (Standard, text)",
+        "checked": "2026-11-14",
+        "note": null
+      },
+      "gpt-5-mini": {
+        "input": 0.25,
+        "cached_input": 0.025,
+        "output": 2.0,
+        "source": "https://developers.openai.com/api/docs/pricing (Standard, text)",
+        "checked": "2026-11-14",
+        "note": null
+      }
+    },
+    "max_dollars": 2.0,
+    "max_evaluations": null,
+    "out_dir": "runs/dream_openai_v6_full",
+    "run_id": null
+  },
+  "usage": {
+    "agent": {
+      "calls": 62,
+      "prompt_tokens": 110193,
+      "completion_tokens": 86491,
+      "cached_tokens": 2176,
+      "reasoning_tokens": 22501
+    },
+    "sleep": {
+      "calls": 5,
+      "prompt_tokens": 44354,
+      "completion_tokens": 11242,
+      "cached_tokens": 0,
+      "reasoning_tokens": 3200
+    },
+    "total": {
+      "calls": 67,
+      "prompt_tokens": 154547,
+      "completion_tokens": 97733,
+      "cached_tokens": 2176,
+      "reasoning_tokens": 25701
+    }
+  },
+  "llm_params": {
+    "model": "gpt-5-nano",
+    "reasoning_model": true,
+    "token_param": "max_completion_tokens",
+    "token_param_setting": "auto",
+    "reasoning_effort": "low",
+    "temperature": null,
+    "thinking": null,
+    "dropped": [],
+    "sources": {
+      "reasoning_model": "auto",
+      "token_param": "config",
+      "reasoning_effort": "config",
+      "temperature": "auto",
+      "thinking": "auto"
+    }
+  },
+  "sleep_llm_params": {
+    "model": "gpt-5-mini",
+    "reasoning_model": true,
+    "token_param": "max_completion_tokens",
+    "token_param_setting": "auto",
+    "reasoning_effort": "low",
+    "temperature": null,
+    "thinking": null,
+    "dropped": [],
+    "sources": {
+      "reasoning_model": "auto",
+      "token_param": "config",
+      "reasoning_effort": "config",
+      "temperature": "auto",
+      "thinking": "auto"
+    }
+  },
+  "cost": {
+    "currency": "USD",
+    "model": "gpt-5-nano",
+    "price_key": "gpt-5-nano",
+    "price_per_1m": {
+      "input": 0.05,
+      "cached_input": 0.005,
+      "output": 0.4,
+      "source": "https://developers.openai.com/api/docs/pricing (Standard, text)",
+      "checked": "2026-11-14",
+      "note": null
+    },
+    "price_source": "https://developers.openai.com/api/docs/pricing (Standard, text)",
+    "by_role": {
+      "agent": 0.040008,
+      "sleep": 0.033572
+    },
+    "total": 0.07358,
+    "complete": true,
+    "formula": "((prompt - cached) * input + cached * cached_input + completion * output) / 1e6",
+    "notes": [
+      "sleep role priced at 'gpt-5-mini'"
+    ],
+    "sleep_model": "gpt-5-mini",
+    "sleep_price_per_1m": {
+      "input": 0.25,
+      "cached_input": 0.025,
+      "output": 2.0,
+      "source": "https://developers.openai.com/api/docs/pricing (Standard, text)",
+      "checked": "2026-11-14",
+      "note": null
+    }
+  },
+  "metrics": {
+    "schema": "baseline_metrics/v1",
+    "arm": "dream_unvalidated",
+    "sleep_policy": "full_sleep",
+    "best_known": -2.639027469506608,
+    "checkpoints": {
+      "0.1": 0.655852980587441,
+      "0.25": 0.8796758231688693,
+      "0.5": 0.8796758231688693,
+      "0.75": 0.989635301064978,
+      "1": 0.989635301064978
+    },
+    "reach": {
+      "0.95": {
+        "reached": true,
+        "budget_fraction": 0.661796,
+        "step": 42
+      },
+      "0.99": {
+        "reached": false,
+        "budget_fraction": null,
+        "step": null
+      }
+    },
+    "final_best_normalized": 0.989635301064978,
+    "budget_used_fraction": 1.00912,
+    "steps_completed": 61,
+    "sleep": {
+      "llm_sleeps": 3,
+      "forgets": 14,
+      "by_depth": {
+        "forget": 14,
+        "nrem": 2,
+        "nrem_rem": 1
+      },
+      "llm_sleep_steps": [
+        29,
+        39,
+        54
+      ],
+      "forget_steps": [
+        8,
+        11,
+        14,
+        17,
+        20,
+        23,
+        26,
+        33,
+        36,
+        45,
+        48,
+        51,
+        58,
+        61
+      ],
+      "scheduled": null,
+      "realized": 3,
+      "deferrals": 1
+    },
+    "tokens": {
+      "total_budget": 250000,
+      "used": 252280,
+      "agent": 196684,
+      "sleep": 55596,
+      "sleep_share_of_budget": 0.222384,
+      "sleep_share_of_used": 0.220374,
+      "agent_calls": 62,
+      "sleep_calls": 5,
+      "overshoot": 2280
+    },
+    "behavior": {
+      "window": 5,
+      "overall": {
+        "perseveration_rate": 0.7049180327868853,
+        "invalid_rate": 0.08196721311475409,
+        "calibration_error": 6.3032833819446585,
+        "n": 61
+      },
+      "before_sleep": {
+        "perseveration_rate": 0.7999999999999999,
+        "invalid_rate": 0.0,
+        "calibration_error": 0.2014149866500098,
+        "n": 3
+      },
+      "after_sleep": {
+        "perseveration_rate": 0.6,
+        "invalid_rate": 0.0,
+        "calibration_error": 0.35256196319396094,
+        "n": 3
+      },
+      "around_sleeps": [
+        {
+          "step": 29,
+          "depth": "nrem",
+          "before": {
+            "perseveration_rate": 0.8,
+            "invalid_rate": 0.0,
+            "calibration_error": 0.20348405092592597,
+            "n": 5
+          },
+          "after": {
+            "perseveration_rate": 0.2,
+            "invalid_rate": 0.0,
+            "calibration_error": 0.9253138936971093,
+            "n": 5
+          }
+        },
+        {
+          "step": 39,
+          "depth": "nrem_rem",
+          "before": {
+            "perseveration_rate": 0.6,
+            "invalid_rate": 0.0,
+            "calibration_error": 0.3623629254850088,
+            "n": 5
+          },
+          "after": {
+            "perseveration_rate": 0.8,
+            "invalid_rate": 0.0,
+            "calibration_error": 0.09599495884773661,
+            "n": 5
+          }
+        },
+        {
+          "step": 54,
+          "depth": "nrem",
+          "before": {
+            "perseveration_rate": 1.0,
+            "invalid_rate": 0.0,
+            "calibration_error": 0.03839798353909456,
+            "n": 5
+          },
+          "after": {
+            "perseveration_rate": 0.8,
+            "invalid_rate": 0.0,
+            "calibration_error": 0.03637703703703697,
+            "n": 5
+          }
+        }
+      ]
+    },
+    "fatigue_curve": {
+      "step": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61
+      ],
+      "fatigue": [
+        0.0,
+        0.026251,
+        0.053984,
+        0.080651,
+        0.107968,
+        0.158092,
+        0.218301,
+        0.289503,
+        0.375559,
+        0.365987,
+        0.423235,
+        0.490175,
+        0.439001,
+        0.387189,
+        0.422594,
+        0.396622,
+        0.402929,
+        0.419318,
+        0.384825,
+        0.419445,
+        0.430213,
+        0.416813,
+        0.447684,
+        0.486811,
+        0.42596,
+        0.462398,
+        0.496458,
+        0.453317,
+        0.484282,
+        0.537504,
+        0.193471,
+        0.23042,
+        0.264543,
+        0.302442,
+        0.365979,
+        0.425323,
+        0.464964,
+        0.409866,
+        0.464412,
+        0.517436,
+        0.07545,
+        0.116144,
+        0.156112,
+        0.19689,
+        0.267796,
+        0.320407,
+        0.313609,
+        0.358572,
+        0.401223,
+        0.384035,
+        0.432778,
+        0.473485,
+        0.439304,
+        0.485748,
+        0.577546,
+        0.215995,
+        0.254843,
+        0.293883,
+        0.333798,
+        0.402107,
+        0.448396,
+        0.536845
+      ],
+      "level": [
+        "rested",
+        "rested",
+        "rested",
+        "rested",
+        "rested",
+        "rested",
+        "rested",
+        "rested",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "tired",
+        "rested",
+        "rested",
+        "rested",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "tired",
+        "rested",
+        "rested",
+        "rested",
+        "rested",
+        "rested",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "tired",
+        "rested",
+        "rested",
+        "rested",
+        "drowsy",
+        "drowsy",
+        "drowsy",
+        "tired"
+      ]
+    },
+    "memory": {
+      "items_added": 10,
+      "items_evicted": 1,
+      "replays_wasted": 5,
+      "replays_run": 7,
+      "replay_evaluations": 8,
+      "dream_calls": 1,
+      "dream_evaluations": 0,
+      "dreams_validated": 0,
+      "dreams_refuted": 0,
+      "dreams_uncertain": 0,
+      "dreams_untested": 3,
+      "replay_control_ref": 4,
+      "replay_control_full": 0,
+      "replay_treatment_diff": 4,
+      "replay_treatment_full": 0,
+      "replay_diff_failures": 0,
+      "replay_base_missing": 0,
+      "dream_control_ref": 3,
+      "dream_control_full": 0,
+      "dream_treatment_diff": 3,
+      "dream_treatment_full": 0,
+      "dream_diff_failures": 0,
+      "dream_base_missing": 0
+    },
+    "evaluations": {
+      "used": 70,
+      "agent": 62,
+      "sleep": 8,
+      "extra": 0,
+      "extra_scheduled": 0,
+      "limit": null
+    },
+    "edits": {
+      "full_steps": 61,
+      "diff_steps": 0,
+      "no_code_steps": 0,
+      "diff_valid": 0,
+      "diff_apply_failures": 0,
+      "full_rejected": 0,
+      "diff_salvaged": 0,
+      "parent_truncated_steps": 0,
+      "diffs_forbidden_steps": 0,
+      "fuzzy_blocks": 0,
+      "diff_lines_changed_mean": null,
+      "diff_share": 0.0,
+      "full_with_reason": 0,
+      "full_rewrite_reasons": {
+        "none": 61
+      },
+      "search_blocks": 0,
+      "search_exact_share": null,
+      "search_near_miss_blocks": null,
+      "search_copy_score_mean": null
+    }
+  },
+  "alphaevolve": {
+    "schema_version": 1,
+    "registry_sha256": "faa97656349807f2de1c7d8e74423261c1e9812be2cada8c824e66c04f0e0745",
+    "problem_id": 7,
+    "in_benchmark": true,
+    "name": "Difference Bases",
+    "tier": 1,
+    "status": "world_record",
+    "status_raw": "world_record",
+    "evaluator": "evaluators.p7_difference_bases:DifferenceBasis",
+    "evaluator_instance": {
+      "set": "nonnegative_integers",
+      "n": "free",
+      "max_set_size": 2000
+    },
+    "instance_match": true,
+    "instance_id": "difference_basis_upper",
+    "instance_params": {
+      "set": "nonnegative_integers",
+      "n": "free",
+      "max_set_size": 2000
+    },
+    "direction": "minimize",
+    "score_transform": "negate",
+    "verification": {
+      "status": "passed",
+      "reason": null,
+      "construction_score": -2.639027469506608,
+      "expected_score": -2.639027469506608,
+      "tolerance": 1e-12
+    },
+    "scored": true,
+    "reason": null,
+    "alphaevolve_value": 2.639027469506608,
+    "alphaevolve_score": -2.639027469506608,
+    "alphaevolve_source": "experiments/difference_bases/difference_bases.ipynb cell 1 (A=[0,1,4,6], Singer set B, m=89^2+89+1 -> |B|=360 covering 1..49109), computed with a port of get_score; paper Problem 6.7: 2.6571 -> 2.6390",
+    "prior_best_value": {
+      "value": 2.6571,
+      "source": "paper Problem 6.7 (Delta(6166) <= 128)",
+      "missing_note": null
+    },
+    "current_best_value": {
+      "value": 2.639027469506608,
+      "source": "status.json world_record; problems/7.html lists no later improvement",
+      "missing_note": null,
+      "holder": "AlphaEvolve"
+    },
+    "seed_score": -22.05,
+    "our_best_score": -2.6666666666666665,
+    "our_best_value": 2.6666666666666665,
+    "normalized_vs_ae": 0.989635301064978,
+    "gap_closed": 0.9985761044627393,
+    "gap_closed_reason": null,
+    "matched_ae": false,
+    "beat_ae": false,
+    "match_tolerance": 1e-09,
+    "beat_status": "not_claimed",
+    "beat_verification": null,
+    "total_budget_tokens": 250000,
+    "budget_to_reach": {
+      "0.9": {
+        "reached": true,
+        "step": 42,
+        "tokens": 165449,
+        "fraction": 0.661796
+      },
+      "0.95": {
+        "reached": true,
+        "step": 42,
+        "tokens": 165449,
+        "fraction": 0.661796
+      },
+      "0.99": {
+        "reached": false,
+        "step": null,
+        "tokens": null,
+        "fraction": null
+      }
+    },
+    "budget_at_best": {
+      "step": 42,
+      "tokens": 165449,
+      "fraction": 0.661796
+    },
+    "third_party": []
+  }
+}

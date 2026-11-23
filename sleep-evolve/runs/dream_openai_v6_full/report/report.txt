@@ -1,0 +1,62 @@
+Baseline comparison: 20 runs, 4 (problem, seed) pairs, arms: no_sleep, fixed_letta, summarize, dream_unvalidated, dream
+
+Per arm (medians across runs; sleeps = LLM sleeps):
+  arm                n   final    @25% 95%reach  b2_95 sleeps forget sleep%  added  evict wasted  evals ev/slp ev/ext  edit  diff%  dfail     cost$
+  no_sleep           4   0.833   0.768    1/4     0.15    0.0    0.0    0.0    0.0    0.0    0.0   68.5    0.0    0.0  full    0.0    0.0    0.2061
+  fixed_letta        4   0.951   0.892    2/4     0.21    9.0    0.0   31.9   14.0    1.5    9.0   74.2   25.5    0.0  full    0.0    0.0    0.3379
+  summarize          4   0.901   0.899    2/4     0.06    7.5    0.0   13.0    0.0    0.0    0.0   41.0    0.0    0.0  full    0.0    0.0    0.2712
+  dream_unvalidated   4   0.939   0.854    1/4     0.66    3.0   13.0   19.6    8.5    0.2    3.0   68.5   10.0    0.0  full    0.0    0.0    0.2759
+  dream              4   0.824   0.734    0/4        -    3.8    9.5   30.3   17.0    0.5    3.8   66.5   17.5    0.0  full    0.0    0.0    0.3079
+  total cost of all runs: 1.3990 (USD, from logged usage; '+' = some runs have no known cost)
+
+Behavior before -> after LLM sleeps (mean rates; * = placebo at the paired fatigue run's sleep steps):
+  no_sleep          perseveration -->-  invalid -->-  calibration err -->-
+  fixed_letta       perseveration 0.696->0.775  invalid 0.072->0.050  calibration err 4.273->2.563
+  summarize         perseveration 0.664->0.707  invalid 0.126->0.145  calibration err 0.207->0.175
+  dream_unvalidated  perseveration 0.746->0.500  invalid 0.058->0.117  calibration err 2363548.728->0.327
+  dream             perseveration 0.717->0.578  invalid 0.117->0.124  calibration err 3.503->2.622
+
+Paired contrasts (first arm minus second; W/T/L from the first arm's view):
+  Q  contrast                         match outcome         n   median              95% CI       p    W/T/L cens  verdict
+  Q1 fixed_letta - no_sleep           tok   budget_to_95    4  -0.0092     [-0.715,+0.000]     0.5  2/2/0      5  not significant
+  Q1 fixed_letta - no_sleep           tok   final_score     4  +0.0001     [-0.015,+0.251]    0.75  2/1/1      0  not significant
+  Q1 fixed_letta - no_sleep           tok   score_at_25     4  +0.0201     [+0.000,+0.487]    0.25  3/1/0      0  not significant
+  Q1 fixed_letta - no_sleep           evals score@evals     4  +0.0001     [-0.015,+0.251]    0.75  2/1/1      0  not significant
+  Q3 dream - fixed_letta              tok   budget_to_95    4  +0.3574     [+0.000,+0.865]     0.5  0/2/2      6  not significant
+  Q3 dream - fixed_letta              tok   final_score     4  -0.0603     [-0.269,+0.080]   0.375  1/0/3      0  not significant
+  Q3 dream - fixed_letta              tok   score_at_25     4  -0.1127     [-0.266,+0.071]   0.375  1/0/3      0  not significant
+  Q3 dream - fixed_letta              evals score@evals     4  -0.0603     [-0.269,+0.080]   0.375  1/0/3      0  not significant
+  Q3 dream - no_sleep                 tok   budget_to_95    4  +0.0000     [+0.000,+0.847]       1  0/3/1      7  not significant
+  Q3 dream - no_sleep                 tok   final_score     4  +0.0275     [-0.269,+0.141]       1  2/0/2      0  not significant
+  Q3 dream - no_sleep                 tok   score_at_25     4  +0.0517     [-0.263,+0.267]   0.625  3/0/1      0  not significant
+  Q3 dream - no_sleep                 evals score@evals     4  +0.0275     [-0.269,+0.302]   0.875  2/0/2      0  not significant
+  Q3 dream - dream_unvalidated        tok   budget_to_95    4  +0.0000     [+0.000,+0.338]       1  0/3/1      7  not significant
+  Q3 dream - dream_unvalidated        tok   final_score     4  -0.0749     [-0.209,+0.018]    0.25  1/0/3      0  not significant
+  Q3 dream - dream_unvalidated        tok   score_at_25     4  -0.0553     [-0.220,+0.010]   0.375  1/0/3      0  not significant
+  Q3 dream - dream_unvalidated        evals score@evals     4  -0.0749     [-0.209,+0.018]    0.25  1/0/3      0  not significant
+  Q3 dream_unvalidated - fixed_letta  tok   budget_to_95    4  +0.1883     [+0.000,+0.865]     0.5  0/2/2      5  not significant
+  Q3 dream_unvalidated - fixed_letta  tok   final_score     4  +0.0146     [-0.060,+0.062]    0.75  2/1/1      0  not significant
+  Q3 dream_unvalidated - fixed_letta  tok   score_at_25     4  -0.0076     [-0.164,+0.080]    0.75  1/1/2      0  not significant
+  Q3 dream_unvalidated - fixed_letta  evals score@evals     4  +0.0146     [-0.060,+0.062]    0.75  2/1/1      0  not significant
+  Q3 summarize - no_sleep             tok   budget_to_95    4  -0.0262     [-0.972,+0.000]     0.5  2/2/0      5  not significant
+  Q3 summarize - no_sleep             tok   final_score     4  +0.0277     [-0.105,+0.251]   0.875  2/0/2      0  not significant
+  Q3 summarize - no_sleep             tok   score_at_25     4  +0.0282     [-0.045,+0.597]   0.625  2/0/2      0  not significant
+  Q3 summarize - no_sleep             evals score@evals     4  +0.0277     [-0.085,+0.412]   0.875  2/0/2      0  not significant
+  (Wilcoxon signed-rank, two-sided: exact (2^2 sign assignments, tie-averaged ranks, zeros dropped); median CI: percentile bootstrap, 10000 resamples, seed 0; budget_to_95 'not reached' = 1.0, censored)
+  (match tok = equal token budget; evals = score at N = min(evaluator calls of the pair), replays and extra evals included)
+
+Summary
+  Q1 (does sleep help?): no significant difference from no_sleep. fixed_letta vs no_sleep: median paired difference in final best normalized score +0.000 (95% CI -0.015 to +0.251), Wilcoxon p=0.75 (NOT significant), W/T/L 2/1/1 over 4 pairs. Q1 at an equal evaluator-call count (replays included): fixed_letta vs no_sleep: median paired difference in best normalized score at the pair's matched evaluator-call count +0.000 (95% CI -0.015 to +0.251), Wilcoxon p=0.75 (NOT significant), W/T/L 2/1/1 over 4 pairs. Q2 (does fatigue timing beat fixed schedules?): not testable (arms missing). Primary outcome: final best normalized score; significance at alpha=0.05, two-sided. With only 4 pairs no exact Wilcoxon test can reach p<0.05 (minimum p = 2/2^n), so every result here is not significant by construction; run more seeds.
+
+What the results support:
+  - Underpowered: 4 pair(s) per contrast; no '~' or '>' pattern of the guide can be assessed (need >= 6 pairs for p < 0.05 to be attainable).
+
+Interpretation guide
+  - fatigue > fixed_matched                      -> timing matters, beyond the amount of sleep
+  - fatigue ~ fixed_matched, both > fixed_letta  -> the gain comes from sleeping less often, not from smart timing
+  - fixed_matched ~ random_matched               -> fixed schedules carry no timing benefit
+  - any sleep arm < no_sleep                     -> consolidation costs more budget than it returns at this run length
+  - dream > fixed_letta                          -> REM dreaming + A/B validation beats NREM-only (the central claim)
+  - dream ~ dream_unvalidated                    -> the hypotheses help even untested; validation is not load-bearing
+  - dream < dream_unvalidated                    -> validation evals cost more budget than confirmed discoveries return
+  ('>' / '<' = significant paired difference at alpha; '~' = not significant)
